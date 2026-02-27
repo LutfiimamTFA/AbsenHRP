@@ -27,7 +27,12 @@ The app priority-checks roles in this order:
 Privileged roles (`hrd`, `manager`, `superadmin`) have access to the Admin Dashboard.
 
 ## Security Rules (Implemented in firestore.rules)
-Security rules are configured to protect user data while allowing admins to monitor activity. 
-- **Users**: Read their own profile.
-- **Attendance Events**: Users read their own; Admins read all.
-- **Work Locations**: All authed users read (for geofencing).
+Security rules protect user privacy while allowing administrators to monitor activity globally.
+
+### Key Policies:
+- **Admins**: Full read access to all collections (users, events, locations).
+- **Users**: 
+  - Read/Write their own profile in `/users/{uid}`.
+  - Read their own attendance events (requires `uid` filter in queries).
+  - Read all work locations (for geofencing calculations).
+- **Attendance Writes**: Blocked for direct client access; handled securely via the `submitAttendance` Cloud Function.

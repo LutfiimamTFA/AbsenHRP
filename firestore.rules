@@ -3,9 +3,11 @@ service cloud.firestore {
   match /databases/{database}/documents {
     
     // Helper to check if user has a privileged role
+    // Uses short-circuiting to avoid get() errors if the user document is missing
     function isPrivileged() {
       return request.auth != null && (
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['hrd', 'manager', 'superadmin'] ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['hrd', 'manager', 'superadmin']) ||
         exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
         exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
         exists(/databases/$(database)/documents/roles_manager/$(request.auth.uid))
@@ -31,12 +33,13 @@ service cloud.firestore {
 
     // Attendance Events
     match /attendance_events/{event} {
-      // Users can see their own, privileged users can see all (required for Admin Dashboard list)
+      // Admins can list all, users can only list their own (requires query filter)
+      // Admins can get any, users can only get their own
       allow read: if request.auth != null && (
-        resource == null || // For queries that haven't matched a doc yet
-        resource.data.uid == request.auth.uid || 
-        isPrivileged()
+        isPrivileged() || 
+        resource.data.uid == request.auth.uid
       );
+      
       // Writes are handled by the Cloud Function (submitAttendance) which uses Admin SDK
       allow write: if false;
     }
