@@ -1,7 +1,7 @@
 
 # PresenGO - Mobile-First Attendance
 
-A fast, secure, single-screen attendance web application.
+A fast, secure, single-screen attendance web application with AI-powered anomaly explanations.
 
 ## Prerequisites
 - Firebase Project ID: `studio-9262077557-bc9c9`
@@ -17,50 +17,17 @@ NEXT_PUBLIC_FIREBASE_APP_ID=1:80532457942:web:aa51bae0a3a5bd0b243c77
 NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=80532457942
 ```
 
-## Security Rules (Apply in Firebase Console)
+## Role-Based Access Control (RBAC)
+The app priority-checks roles in this order:
+1. `users/{uid}.role` field.
+2. `roles_admin/{uid}` exists.
+3. `roles_hrd/{uid}` exists.
+4. `roles_manager/{uid}` exists.
 
-### Firestore
-```
-rules_version = '2';
-service cloud.firestore {
-  match /databases/{database}/documents {
-    match /attendance_events/{event} {
-      allow write: if false; // Only server (functions)
-      allow read: if request.auth != null && request.auth.uid == resource.data.uid;
-    }
-    match /work_locations/{loc} {
-      allow read: if request.auth != null;
-    }
-    match /users/{uid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-    }
-    // Roles fallbacks for HRP compatibility
-    match /roles_admin/{uid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-    }
-    match /roles_hrd/{uid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-    }
-    match /roles_manager/{uid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-    }
-  }
-}
-```
+Privileged roles (`hrd`, `manager`, `superadmin`) have access to the Admin Dashboard.
 
-### Storage
-```
-rules_version = '2';
-service firebase.storage {
-  match /b/{bucket}/o {
-    match /attendance_raw/{uid}/{allPaths=**} {
-      allow write: if false; // Only server
-      allow read: if request.auth != null && request.auth.uid == uid;
-    }
-    match /attendance_wm/{uid}/{allPaths=**} {
-      allow write: if false; // Only server
-      allow read: if request.auth != null && request.auth.uid == uid;
-    }
-  }
-}
-```
+## Security Rules (Implemented in firestore.rules)
+Security rules are configured to protect user data while allowing admins to monitor activity. 
+- **Users**: Read their own profile.
+- **Attendance Events**: Users read their own; Admins read all.
+- **Work Locations**: All authed users read (for geofencing).

@@ -1,0 +1,52 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // Helper to check if user has a privileged role
+    function isPrivileged() {
+      return request.auth != null && (
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['hrd', 'manager', 'superadmin'] ||
+        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
+        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
+        exists(/databases/$(database)/documents/roles_manager/$(request.auth.uid))
+      );
+    }
+
+    // User profiles
+    match /users/{uid} {
+      allow read: if request.auth != null && (request.auth.uid == uid || isPrivileged());
+      allow write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Role fallbacks
+    match /roles_admin/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+    }
+    match /roles_hrd/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+    }
+    match /roles_manager/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // Attendance Events
+    match /attendance_events/{event} {
+      // Users can see their own, privileged users can see all (required for Admin Dashboard list)
+      allow read: if request.auth != null && (
+        resource == null || // For queries that haven't matched a doc yet
+        resource.data.uid == request.auth.uid || 
+        isPrivileged()
+      );
+      // Writes are handled by the Cloud Function (submitAttendance) which uses Admin SDK
+      allow write: if false;
+    }
+
+    // Work Locations
+    match /work_locations/{loc} {
+      // All authenticated users can list work locations for geofencing
+      allow read: if request.auth != null;
+      // Only privileged users can manage locations
+      allow write: if isPrivileged();
+    }
+  }
+}

@@ -31,10 +31,11 @@ export function useCollection<T = DocumentData>(query: Query<T> | null) {
       },
       async (err) => {
         if (err.code === 'permission-denied') {
-          // Identify the query path if possible from the internal properties or passed context
-          // Since query doesn't easily expose the raw path in a clean way, we use a generic label or best effort
+          // Attempt to get a more descriptive path from the query object if available
+          // In some SDK versions, query.path or internal _query property might exist,
+          // but we'll default to a more useful generic label.
           const permissionError = new FirestorePermissionError({
-            path: 'collection/query',
+            path: (query as any)._query?.path?.toString() || 'collection/query',
             operation: 'list',
           });
           errorEmitter.emit('permission-error', permissionError);
