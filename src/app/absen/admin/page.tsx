@@ -1,4 +1,3 @@
-
 'use client';
 
 import React, { useMemo } from 'react';
@@ -18,12 +17,16 @@ export default function AdminDashboard() {
   const router = useRouter();
 
   const eventsQuery = useMemo(() => {
+    // Prevent unauthorized list operation if user is not resolved or not privileged
+    if (!user || !user.isPrivileged) return null;
     return query(collection(db, 'attendance_events'), orderBy('tsServer', 'desc'), limit(50));
-  }, [db]);
+  }, [db, user]);
 
   const locationsQuery = useMemo(() => {
+    // Prevent unauthorized list operation if user is not resolved or not privileged
+    if (!user || !user.isPrivileged) return null;
     return query(collection(db, 'work_locations'));
-  }, [db]);
+  }, [db, user]);
 
   const { data: events, loading: eventsLoading } = useCollection(eventsQuery);
   const { data: locations, loading: locationsLoading } = useCollection(locationsQuery);

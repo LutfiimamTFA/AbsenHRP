@@ -48,6 +48,7 @@ export default function AbsenPage() {
   }, [user, userLoading, router]);
 
   const lastEventQuery = useMemo(() => {
+    // Prevent query if user is not resolved or is a candidate
     if (!user || user.role === 'kandidat') return null;
     // Mandatory filter by UID for security and compliance with rules
     return query(
@@ -91,6 +92,7 @@ export default function AbsenPage() {
 
   useEffect(() => {
     const checkGeofence = async () => {
+      // Ensure we are logged in and STAFF before querying
       if (!location || !user || !user.isInternal || user.role === 'kandidat') return;
       
       try {
