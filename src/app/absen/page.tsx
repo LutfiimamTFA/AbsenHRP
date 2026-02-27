@@ -9,7 +9,7 @@ import { useAuth, useFirestore, useUser, useCollection } from '@/firebase';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, LayoutDashboard, Info } from 'lucide-react';
+import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, LayoutDashboard, Info, ShieldAlert } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
@@ -36,14 +36,20 @@ export default function AbsenPage() {
   
   const deviceId = useDeviceId();
 
+  // Guard: Block candidates or unauthenticated users
   useEffect(() => {
-    if (!userLoading && !user) {
-      router.push('/login');
+    if (!userLoading) {
+      if (!user) {
+        router.push('/login');
+      } else if (user.role === 'kandidat' || !user.isInternal) {
+        router.push('/unauthorized');
+      }
     }
   }, [user, userLoading, router]);
 
   const lastEventQuery = useMemo(() => {
-    if (!user) return null;
+    if (!user || user.role === 'kandidat') return null;
+    // Mandatory filter by UID for security and compliance with rules
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
@@ -62,7 +68,7 @@ export default function AbsenPage() {
   }, [events]);
 
   useEffect(() => {
-    if (!user) return;
+    if (!user || user.role === 'kandidat') return;
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         setLocation({
@@ -85,8 +91,7 @@ export default function AbsenPage() {
 
   useEffect(() => {
     const checkGeofence = async () => {
-      // Only check geofence if we have a location AND a user
-      if (!location || !user) return;
+      if (!location || !user || user.role === 'kandidat') return;
       
       try {
         const collRef = collection(db, 'work_locations');
@@ -123,7 +128,7 @@ export default function AbsenPage() {
 
   useEffect(() => {
     const getExplanation = async () => {
-      if (!location || !user) return;
+      if (!location || !user || user.role === 'kandidat') return;
       const isAnomaly = location.accuracy > 80 || isNearBoundary || !isWithinRadius;
       
       if (isAnomaly && !anomalyExplanation && !explaining) {
@@ -139,7 +144,7 @@ export default function AbsenPage() {
           });
           setAnomalyExplanation(result.explanation);
         } catch (error) {
-          // Silent fail for AI explanation to not break the main flow
+          // Silent fail for AI explanation
         } finally {
           setExplaining(false);
         }
@@ -151,7 +156,7 @@ export default function AbsenPage() {
   }, [location, isWithinRadius, isNearBoundary, workLocation, user, anomalyExplanation, explaining]);
 
   const handleTap = async (selfieBase64?: string) => {
-    if (!location || !deviceId) return;
+    if (!location || !deviceId || !user || user.role === 'kandidat') return;
     setSubmitting(true);
 
     const isAnomaly = location.accuracy > 80 || isNearBoundary;
@@ -196,7 +201,7 @@ export default function AbsenPage() {
     }
   };
 
-  if (userLoading || !user) {
+  if (userLoading || !user || user.role === 'kandidat') {
     return (
       <div className="min-h-svh flex items-center justify-center bg-background">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />
@@ -218,7 +223,7 @@ export default function AbsenPage() {
             )}
           </div>
           <div>
-            <h1 className="font-bold text-lg leading-tight">{user.displayName || 'PresenGO User'}</h1>
+            <h1 className="font-bold text-lg leading-tight">{user.displayName || 'User'}</h1>
             <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">{user.role}</p>
           </div>
         </div>

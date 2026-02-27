@@ -1,13 +1,13 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { onAuthStateChanged } from 'firebase/auth';
+import { onAuthStateChanged, signOut } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { useAuth, useFirestore } from '../provider';
 import { errorEmitter } from '../error-emitter';
 import { FirestorePermissionError } from '../errors';
 
-export type UserRole = 'employee' | 'karyawan' | 'hrd' | 'manager' | 'superadmin';
+export type UserRole = 'employee' | 'karyawan' | 'hrd' | 'manager' | 'superadmin' | 'super-admin' | 'kandidat';
 
 export interface ExtendedUser {
   uid: string;
@@ -15,6 +15,7 @@ export interface ExtendedUser {
   displayName: string | null;
   role: UserRole;
   isPrivileged: boolean;
+  isInternal: boolean;
 }
 
 export function useUser() {
@@ -57,10 +58,10 @@ export function useUser() {
         if (userDoc.exists() && userDoc.data()?.role) {
           resolvedRole = userDoc.data().role;
         } else {
-          // 2. Fallbacks
+          // 2. Fallbacks to markers
           const adminCheck = await checkDoc(`roles_admin/${firebaseUser.uid}`);
           if (adminCheck.exists()) {
-            resolvedRole = 'superadmin';
+            resolvedRole = 'super-admin';
           } else {
             const hrdCheck = await checkDoc(`roles_hrd/${firebaseUser.uid}`);
             if (hrdCheck.exists()) {
@@ -74,14 +75,17 @@ export function useUser() {
           }
         }
 
-        const isPrivileged = ['hrd', 'manager', 'superadmin'].includes(resolvedRole);
+        const internalRoles: UserRole[] = ['superadmin', 'super-admin', 'hrd', 'manager', 'karyawan', 'employee'];
+        const isInternal = internalRoles.includes(resolvedRole);
+        const isPrivileged = ['hrd', 'manager', 'superadmin', 'super-admin'].includes(resolvedRole);
 
         setUser({
           uid: firebaseUser.uid,
           email: firebaseUser.email,
           displayName: firebaseUser.displayName || userDoc.data()?.name || null,
           role: resolvedRole,
-          isPrivileged
+          isPrivileged,
+          isInternal
         });
       } catch (err) {
         setUser({
@@ -89,7 +93,8 @@ export function useUser() {
           email: firebaseUser.email,
           displayName: firebaseUser.displayName,
           role: 'employee',
-          isPrivileged: false
+          isPrivileged: false,
+          isInternal: true
         });
       } finally {
         setLoading(false);
