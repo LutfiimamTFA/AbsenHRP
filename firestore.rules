@@ -16,24 +16,9 @@ service cloud.firestore {
       return exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid));
     }
 
-    function isManager() {
-      return exists(/databases/$(database)/documents/roles_manager/$(request.auth.uid));
-    }
-
-    // Check role in user profile document
-    function hasPrivilegedRole() {
-      let path = /databases/$(database)/documents/users/$(request.auth.uid);
-      return exists(path) && get(path).data.role in ['hrd', 'manager', 'superadmin', 'super-admin'];
-    }
-
-    // Combined privileged check
-    function isPrivileged() {
-      return isSignedIn() && (isAdmin() || isHrd() || isManager() || hasPrivilegedRole());
-    }
-
-    // User profiles: Users can read/write their own; Admins can read all.
+    // User profiles: Users can read/write their own; Admins/HRD can read all.
     match /users/{uid} {
-      allow read: if isSignedIn() && (request.auth.uid == uid || isPrivileged());
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin() || isHrd());
       allow write: if isSignedIn() && request.auth.uid == uid;
     }
 
@@ -42,21 +27,21 @@ service cloud.firestore {
     match /roles_hrd/{uid} { allow read: if isSignedIn() && request.auth.uid == uid; }
     match /roles_manager/{uid} { allow read: if isSignedIn() && request.auth.uid == uid; }
 
-    // Attendance Events: 
-    // - Employees can only read their own (requires query filter where('uid', '==', auth.uid))
-    // - Privileged roles (Admin/HRD/Manager) can read all.
-    match /attendance_events/{event} {
-      allow read: if isSignedIn() && (
-        isPrivileged() || 
-        (resource.data.uid == request.auth.uid)
-      );
-      allow write: if false;
+    // ABSEN FIX (MATCH EXACT COLLECTION NAMES FROM ERROR)
+    match /work_locations/{locationId} {
+      allow get, list: if request.auth != null;
+      allow create, update, delete: if request.auth != null &&
+        (exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
+         exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)));
     }
 
-    // Work Locations: All authenticated users can read for geofencing. Only privileged can manage.
-    match /work_locations/{loc} {
-      allow read: if isSignedIn();
-      allow write: if isPrivileged();
+    match /attendance_events/{eventId} {
+      allow get, list: if request.auth != null && (
+        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
+        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
+        resource.data.uid == request.auth.uid
+      );
+      allow create, update, delete: if false;
     }
   }
 }
