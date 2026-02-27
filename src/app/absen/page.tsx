@@ -68,7 +68,7 @@ export default function AbsenPage() {
   }, [events]);
 
   useEffect(() => {
-    if (!user || user.role === 'kandidat') return;
+    if (!user || user.role === 'kandidat' || !user.isInternal) return;
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         setLocation({
@@ -91,7 +91,7 @@ export default function AbsenPage() {
 
   useEffect(() => {
     const checkGeofence = async () => {
-      if (!location || !user || user.role === 'kandidat') return;
+      if (!location || !user || !user.isInternal || user.role === 'kandidat') return;
       
       try {
         const collRef = collection(db, 'work_locations');
@@ -128,7 +128,7 @@ export default function AbsenPage() {
 
   useEffect(() => {
     const getExplanation = async () => {
-      if (!location || !user || user.role === 'kandidat') return;
+      if (!location || !user || user.role === 'kandidat' || !user.isInternal) return;
       const isAnomaly = location.accuracy > 80 || isNearBoundary || !isWithinRadius;
       
       if (isAnomaly && !anomalyExplanation && !explaining) {
@@ -156,7 +156,7 @@ export default function AbsenPage() {
   }, [location, isWithinRadius, isNearBoundary, workLocation, user, anomalyExplanation, explaining]);
 
   const handleTap = async (selfieBase64?: string) => {
-    if (!location || !deviceId || !user || user.role === 'kandidat') return;
+    if (!location || !deviceId || !user || user.role === 'kandidat' || !user.isInternal) return;
     setSubmitting(true);
 
     const isAnomaly = location.accuracy > 80 || isNearBoundary;
@@ -201,7 +201,7 @@ export default function AbsenPage() {
     }
   };
 
-  if (userLoading || !user || user.role === 'kandidat') {
+  if (userLoading || !user || user.role === 'kandidat' || !user.isInternal) {
     return (
       <div className="min-h-svh flex items-center justify-center bg-background">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />

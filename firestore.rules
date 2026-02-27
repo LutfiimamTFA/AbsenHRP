@@ -2,21 +2,29 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // Minimal and robust privilege check using role markers (Safe for LIST)
+    // Helper to check if user is authenticated
     function isSignedIn() {
       return request.auth != null;
     }
 
+    // Helper to check for superadmin fallback marker
     function isSuperAdmin() {
       return isSignedIn() && exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
     }
 
+    // Helper to check for HRD fallback marker
     function isHrd() {
       return isSignedIn() && exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid));
     }
 
+    // Helper to check for manager fallback marker
+    function isManager() {
+      return isSignedIn() && exists(/databases/$(database)/documents/roles_manager/$(request.auth.uid));
+    }
+
+    // Combined privileged check using markers (safe for list operations)
     function isPrivileged() {
-      return isSuperAdmin() || isHrd();
+      return isSuperAdmin() || isHrd() || isManager();
     }
 
     // User profiles: Users can read/write their own; Admins can read all.
@@ -32,7 +40,7 @@ service cloud.firestore {
 
     // Attendance Events: 
     // - Employees can only read their own (requires query filter where('uid', '==', auth.uid))
-    // - Privileged roles (Admin/HRD) can read all.
+    // - Privileged roles (Admin/HRD/Manager) can read all.
     // - All client-side writes are denied; handled by secure Cloud Functions.
     match /attendance_events/{event} {
       allow read: if isSignedIn() && (
@@ -42,7 +50,7 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    // Work Locations: All authenticated users can read for geofencing. Only privileged can manage.
+    // Work Locations: All authenticated staff can read for geofencing. Only privileged can manage.
     match /work_locations/{loc} {
       allow read: if isSignedIn();
       allow write: if isPrivileged();
