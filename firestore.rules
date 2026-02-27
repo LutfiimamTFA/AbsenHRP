@@ -7,11 +7,6 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Helper to get user data from profile doc
-    function getUserData() {
-      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
-    }
-
     // Role resolution helpers using marker collections
     function isSuperAdminMarker() {
       return exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
@@ -32,15 +27,7 @@ service cloud.firestore {
         isHrdMarker() || 
         isManagerMarker() ||
         (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         getUserData().role in ['hrd', 'manager', 'superadmin', 'super-admin'])
-      );
-    }
-
-    // Staff check: User has a profile or is privileged
-    function isStaff() {
-      return isSignedIn() && (
-        isPrivileged() || 
-        exists(/databases/$(database)/documents/users/$(request.auth.uid))
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['hrd', 'manager', 'superadmin', 'super-admin'])
       );
     }
 
@@ -67,9 +54,9 @@ service cloud.firestore {
       allow write: if false;
     }
 
-    // Work Locations: All authenticated staff can read for geofencing. Only privileged can manage.
+    // Work Locations: All authenticated users can read for geofencing. Only privileged can manage.
     match /work_locations/{loc} {
-      allow read: if isStaff();
+      allow read: if isSignedIn();
       allow write: if isPrivileged();
     }
   }
