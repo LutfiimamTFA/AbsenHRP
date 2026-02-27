@@ -7,7 +7,7 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Role resolution helpers using marker collections
+    // Role resolution helpers using marker collections (Safest for LIST rules)
     function isSuperAdminMarker() {
       return exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
     }
@@ -20,14 +20,19 @@ service cloud.firestore {
       return exists(/databases/$(database)/documents/roles_manager/$(request.auth.uid));
     }
 
+    // Helper to check if user has a profile with a privileged role string
+    function hasPrivilegedRoleString() {
+      let userPath = /databases/$(database)/documents/users/$(request.auth.uid);
+      return exists(userPath) && get(userPath).data.role in ['hrd', 'manager', 'superadmin', 'super-admin'];
+    }
+
     // Combined privileged check (Markers OR Role String in User Doc)
     function isPrivileged() {
       return isSignedIn() && (
         isSuperAdminMarker() || 
         isHrdMarker() || 
         isManagerMarker() ||
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['hrd', 'manager', 'superadmin', 'super-admin'])
+        hasPrivilegedRoleString()
       );
     }
 
@@ -49,7 +54,7 @@ service cloud.firestore {
     match /attendance_events/{event} {
       allow read: if isSignedIn() && (
         isPrivileged() || 
-        (resource != null && resource.data.uid == request.auth.uid)
+        (resource.data.uid == request.auth.uid)
       );
       allow write: if false;
     }

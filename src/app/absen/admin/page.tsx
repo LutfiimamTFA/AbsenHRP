@@ -17,16 +17,17 @@ export default function AdminDashboard() {
   const router = useRouter();
 
   const eventsQuery = useMemo(() => {
-    // Prevent unauthorized list operation if user is not resolved or not privileged
-    if (!user || !user.isPrivileged) return null;
+    // CRITICAL: Prevent unauthorized list operation if user is not resolved or not privileged
+    // Returning null ensures useCollection doesn't start a forbidden query.
+    if (userLoading || !user || !user.isPrivileged) return null;
     return query(collection(db, 'attendance_events'), orderBy('tsServer', 'desc'), limit(50));
-  }, [db, user]);
+  }, [db, user, userLoading]);
 
   const locationsQuery = useMemo(() => {
-    // Prevent unauthorized list operation if user is not resolved or not privileged
-    if (!user || !user.isPrivileged) return null;
+    // CRITICAL: Prevent unauthorized list operation if user is not resolved or not privileged
+    if (userLoading || !user || !user.isPrivileged) return null;
     return query(collection(db, 'work_locations'));
-  }, [db, user]);
+  }, [db, user, userLoading]);
 
   const { data: events, loading: eventsLoading } = useCollection(eventsQuery);
   const { data: locations, loading: locationsLoading } = useCollection(locationsQuery);

@@ -75,7 +75,7 @@ export function useUser() {
           }
         }
 
-        // Normalize staff roles
+        // Normalize staff roles (Handling variations like 'superadmin' and 'super-admin')
         const internalRoles: UserRole[] = ['superadmin', 'super-admin', 'hrd', 'manager', 'karyawan', 'employee'];
         const isInternal = internalRoles.includes(resolvedRole);
         const isPrivileged = ['hrd', 'manager', 'superadmin', 'super-admin'].includes(resolvedRole);
