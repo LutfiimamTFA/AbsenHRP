@@ -16,15 +16,19 @@ export default function AdminDashboard() {
   const db = useFirestore();
   const router = useRouter();
 
+  // CRITICAL: Stabilize query creation to prevent unauthorized list attempts
   const eventsQuery = useMemo(() => {
-    // CRITICAL: Prevent unauthorized list operation if user is not resolved or not privileged
-    // Returning null ensures useCollection doesn't start a forbidden query.
+    // Only attempt the query if the user is explicitly confirmed as privileged
     if (userLoading || !user || !user.isPrivileged) return null;
-    return query(collection(db, 'attendance_events'), orderBy('tsServer', 'desc'), limit(50));
+    return query(
+      collection(db, 'attendance_events'), 
+      orderBy('tsServer', 'desc'), 
+      limit(50)
+    );
   }, [db, user, userLoading]);
 
   const locationsQuery = useMemo(() => {
-    // CRITICAL: Prevent unauthorized list operation if user is not resolved or not privileged
+    // Only attempt the query if the user is explicitly confirmed as privileged
     if (userLoading || !user || !user.isPrivileged) return null;
     return query(collection(db, 'work_locations'));
   }, [db, user, userLoading]);

@@ -7,33 +7,28 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    // Role resolution helpers using marker collections (Safest for LIST rules)
-    function isSuperAdminMarker() {
+    // Role resolution helpers using marker collections
+    function isAdmin() {
       return exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
     }
 
-    function isHrdMarker() {
+    function isHrd() {
       return exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid));
     }
 
-    function isManagerMarker() {
+    function isManager() {
       return exists(/databases/$(database)/documents/roles_manager/$(request.auth.uid));
     }
 
-    // Helper to check if user has a profile with a privileged role string
-    function hasPrivilegedRoleString() {
-      let userPath = /databases/$(database)/documents/users/$(request.auth.uid);
-      return exists(userPath) && get(userPath).data.role in ['hrd', 'manager', 'superadmin', 'super-admin'];
+    // Check role in user profile document
+    function hasPrivilegedRole() {
+      let path = /databases/$(database)/documents/users/$(request.auth.uid);
+      return exists(path) && get(path).data.role in ['hrd', 'manager', 'superadmin', 'super-admin'];
     }
 
-    // Combined privileged check (Markers OR Role String in User Doc)
+    // Combined privileged check
     function isPrivileged() {
-      return isSignedIn() && (
-        isSuperAdminMarker() || 
-        isHrdMarker() || 
-        isManagerMarker() ||
-        hasPrivilegedRoleString()
-      );
+      return isSignedIn() && (isAdmin() || isHrd() || isManager() || hasPrivilegedRole());
     }
 
     // User profiles: Users can read/write their own; Admins can read all.
@@ -50,7 +45,6 @@ service cloud.firestore {
     // Attendance Events: 
     // - Employees can only read their own (requires query filter where('uid', '==', auth.uid))
     // - Privileged roles (Admin/HRD/Manager) can read all.
-    // - All client-side writes are denied; handled by secure Cloud Functions.
     match /attendance_events/{event} {
       allow read: if isSignedIn() && (
         isPrivileged() || 
