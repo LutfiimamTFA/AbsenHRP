@@ -13,6 +13,7 @@ export interface ExtendedUser {
   email: string | null;
   displayName: string | null;
   role: UserRole;
+  roleLabel: string;
   isPrivileged: boolean;
   isInternal: boolean;
   brandName?: string;
@@ -45,6 +46,38 @@ export function useUser() {
           resolvedRole = userData.role;
         }
 
+        // 1. Resolve Name with Priorities
+        let resolvedName = userData?.displayName || userData?.name || userData?.fullName;
+        
+        // Fallback to profiles/uid if users/uid is missing it
+        if (!resolvedName) {
+          const profileDoc = await getDoc(doc(db, 'profiles', firebaseUser.uid));
+          if (profileDoc.exists()) {
+            resolvedName = profileDoc.data()?.fullName;
+          }
+        }
+
+        if (!resolvedName) {
+          resolvedName = firebaseUser.displayName;
+        }
+
+        if (!resolvedName && firebaseUser.email) {
+          // Use part before @ as fallback
+          resolvedName = firebaseUser.email.split('@')[0];
+        }
+
+        // 2. Map Role Labels
+        const roleLabels: Record<string, string> = {
+          'karyawan': 'Karyawan',
+          'employee': 'Karyawan',
+          'hrd': 'HRD',
+          'manager': 'Manager',
+          'super-admin': 'Super Admin',
+          'superadmin': 'Super Admin',
+          'kandidat': 'Kandidat'
+        };
+        const userRoleLabel = roleLabels[resolvedRole] || resolvedRole;
+
         let brandName = userData?.brandName;
         if (!brandName && userData?.brandId) {
           const brandDoc = await getDoc(doc(db, 'brands', userData.brandId));
@@ -63,8 +96,9 @@ export function useUser() {
         setUser({
           uid: firebaseUser.uid,
           email: firebaseUser.email,
-          displayName: userData?.displayName || userData?.name || firebaseUser.displayName || null,
+          displayName: resolvedName || null,
           role: resolvedRole,
+          roleLabel: userRoleLabel,
           isPrivileged,
           isInternal,
           brandName: brandName || "Brand belum diatur",
@@ -75,8 +109,9 @@ export function useUser() {
         setUser({
           uid: firebaseUser.uid,
           email: firebaseUser.email,
-          displayName: firebaseUser.displayName,
+          displayName: firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User',
           role: 'employee',
+          roleLabel: 'Karyawan',
           isPrivileged: false,
           isInternal: true
         });

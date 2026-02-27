@@ -41,6 +41,19 @@ export default function AbsenPage() {
   
   const deviceId = useDeviceId();
 
+  // Debugging user fields as requested
+  useEffect(() => {
+    if (!userLoading && user) {
+      console.log("debug user fields", { 
+        uid: user.uid,
+        displayName: user.displayName,
+        email: user.email,
+        role: user.role,
+        brand: user.brandName 
+      });
+    }
+  }, [user, userLoading]);
+
   // Guard: Verifikasi Auth dan Role Internal
   useEffect(() => {
     if (!userLoading) {
@@ -199,7 +212,10 @@ export default function AbsenPage() {
 
   const type = lastEvent?.type === 'IN' ? 'OUT' : 'IN';
   const mode = isWithinRadius ? 'ONSITE' : 'OFFSITE';
-  const userInitials = user?.displayName?.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase() || 'U';
+  
+  // Resolve userName for Avatar and Title
+  const userName = user?.displayName || 'User';
+  const userInitials = userName.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase() || 'U';
 
   return (
     <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto relative overflow-hidden">
@@ -217,7 +233,7 @@ export default function AbsenPage() {
             </Avatar>
             <div className="space-y-0.5">
               <h1 className="font-extrabold text-xl tracking-tight leading-none text-foreground">
-                {user?.displayName || 'User'}
+                {userName}
               </h1>
               <div className="flex flex-wrap items-center gap-1.5 text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">
                 <span>{user?.brandName}</span>
@@ -228,7 +244,7 @@ export default function AbsenPage() {
                     <span className="opacity-30">•</span>
                   </>
                 )}
-                <span className="text-primary/80">{user?.role}</span>
+                <span className="text-primary/80">{user?.roleLabel}</span>
               </div>
             </div>
           </div>
@@ -244,7 +260,7 @@ export default function AbsenPage() {
           </div>
           <div className="flex-1">
             <p className="text-[11px] text-muted-foreground font-medium">
-              Anda login sebagai <span className="text-foreground font-bold">{user?.displayName}</span> ({user?.brandName}).
+              Anda login sebagai <span className="text-foreground font-bold">{userName}</span> ({user?.brandName}).
             </p>
             <p className="text-[10px] text-muted-foreground italic">
               Khusus absensi & riwayat pribadi. Monitoring HRD di portal HRP.
