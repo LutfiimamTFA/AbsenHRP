@@ -1,7 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { onAuthStateChanged, signOut } from 'firebase/auth';
+import { onAuthStateChanged } from 'firebase/auth';
 import { doc, getDoc } from 'firebase/firestore';
 import { useAuth, useFirestore } from '../provider';
 import { errorEmitter } from '../error-emitter';
@@ -61,7 +61,7 @@ export function useUser() {
           // 2. Fallbacks to markers
           const adminCheck = await checkDoc(`roles_admin/${firebaseUser.uid}`);
           if (adminCheck.exists()) {
-            resolvedRole = 'super-admin';
+            resolvedRole = 'superadmin';
           } else {
             const hrdCheck = await checkDoc(`roles_hrd/${firebaseUser.uid}`);
             if (hrdCheck.exists()) {
@@ -75,6 +75,7 @@ export function useUser() {
           }
         }
 
+        // Normalize staff roles
         const internalRoles: UserRole[] = ['superadmin', 'super-admin', 'hrd', 'manager', 'karyawan', 'employee'];
         const isInternal = internalRoles.includes(resolvedRole);
         const isPrivileged = ['hrd', 'manager', 'superadmin', 'super-admin'].includes(resolvedRole);
@@ -88,6 +89,7 @@ export function useUser() {
           isInternal
         });
       } catch (err) {
+        // Safe fallback for error states
         setUser({
           uid: firebaseUser.uid,
           email: firebaseUser.email,

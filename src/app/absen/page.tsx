@@ -9,7 +9,7 @@ import { useAuth, useFirestore, useUser, useCollection } from '@/firebase';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, LayoutDashboard, Info, ShieldAlert } from 'lucide-react';
+import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, LayoutDashboard, Info } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
@@ -33,6 +33,7 @@ export default function AbsenPage() {
   const [submitting, setSubmitting] = useState(false);
   const [anomalyExplanation, setAnomalyExplanation] = useState<string | null>(null);
   const [explaining, setExplaining] = useState(false);
+  const [geofenceChecked, setGeofenceChecked] = useState(false);
   
   const deviceId = useDeviceId();
 
@@ -48,9 +49,7 @@ export default function AbsenPage() {
   }, [user, userLoading, router]);
 
   const lastEventQuery = useMemo(() => {
-    // Prevent query if user is not resolved or is a candidate
-    if (!user || user.role === 'kandidat') return null;
-    // Mandatory filter by UID for security and compliance with rules
+    if (!user || user.role === 'kandidat' || !user.isInternal) return null;
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
@@ -92,8 +91,8 @@ export default function AbsenPage() {
 
   useEffect(() => {
     const checkGeofence = async () => {
-      // Ensure we are logged in and STAFF before querying
-      if (!location || !user || !user.isInternal || user.role === 'kandidat') return;
+      // Ensure we are logged in, STAFF, and have location before querying
+      if (!location || !user || !user.isInternal || user.role === 'kandidat' || geofenceChecked) return;
       
       try {
         const collRef = collection(db, 'work_locations');
@@ -114,6 +113,7 @@ export default function AbsenPage() {
           setWorkLocation(nearest);
           setIsWithinRadius(minDistance <= nearest.radiusM);
           setIsNearBoundary(Math.abs(minDistance - nearest.radiusM) <= 20);
+          setGeofenceChecked(true);
         }
       } catch (err: any) {
         if (err.code === 'permission-denied') {
@@ -125,8 +125,10 @@ export default function AbsenPage() {
         }
       }
     };
+    
+    // Reset geofence check when location changes significantly
     checkGeofence();
-  }, [location, user, db]);
+  }, [location, user, db, geofenceChecked]);
 
   useEffect(() => {
     const getExplanation = async () => {
