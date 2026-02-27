@@ -75,7 +75,7 @@ export default function AbsenPage() {
       orderBy('tsServer', 'desc'),
       limit(50)
     );
-  }, [authReady, internalReady, isInternalUser, user, db]);
+  }, [authReady, internalReady, isInternalUser, user?.uid, db]);
 
   const { data: events, loading: eventsLoading } = useCollection(personalHistoryQuery);
   
@@ -83,6 +83,7 @@ export default function AbsenPage() {
     if (!events || events.length === 0) return null;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
+    // tsServer bisa null saat transisi sinkronisasi server
     const eventDate = events[0].tsServer?.toDate() || new Date();
     return eventDate >= today ? events[0] : null;
   }, [events]);

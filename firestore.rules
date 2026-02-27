@@ -2,43 +2,38 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    function isSignedIn() {
-      return request.auth != null;
+    // Lokasi Kantor: Dibaca oleh semua user internal untuk geofencing
+    match /work_locations/{locationId} {
+      allow get, list: if request.auth != null;
+      allow create, update, delete: if request.auth != null && (
+        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
+        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid))
+      );
     }
 
-    function isAdmin() {
-      return exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
-    }
-
-    function isHRD() {
-      return exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid));
-    }
-
-    // User Profile
+    // Profil User
     match /users/{uid} {
-      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin() || isHRD());
-      allow write: if isSignedIn() && request.auth.uid == uid;
+      allow read: if request.auth != null && (
+        request.auth.uid == uid || 
+        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
+        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid))
+      );
+      allow write: if request.auth != null && request.auth.uid == uid;
     }
 
-    // Koleksi penanda peran: Hanya untuk pengecekan internal rules (exists)
+    // Role Markers (Private - Hanya untuk pengecekan internal rules via exists)
     match /roles_admin/{uid} { allow read, write: if false; }
     match /roles_hrd/{uid} { allow read, write: if false; }
     match /roles_manager/{uid} { allow read, write: if false; }
 
-    // Lokasi Kantor: Dibaca oleh semua user internal untuk geofencing
-    match /work_locations/{locationId} {
-      allow read: if isSignedIn();
-      allow write: if isSignedIn() && (isAdmin() || isHRD());
-    }
-
     // Kejadian Absensi: HANYA boleh baca milik sendiri (kecuali Admin/HRD)
     match /attendance_events/{eventId} {
-      allow read: if isSignedIn() && (
-        isAdmin() || 
-        isHRD() ||
-        (resource != null && resource.data.uid == request.auth.uid)
+      allow get, list: if request.auth != null && (
+        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
+        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
+        resource.data.uid == request.auth.uid
       );
-      // Penulisan hanya melalui Cloud Function yang aman
+      // Penulisan hanya melalui Cloud Function yang aman (submitAttendance)
       allow write: if false;
     }
   }
