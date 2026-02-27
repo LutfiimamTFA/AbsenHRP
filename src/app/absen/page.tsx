@@ -47,7 +47,9 @@ export default function AbsenPage() {
     if (!userLoading) {
       setAuthReady(true);
       if (user) {
+        // Log project ID for verification
         console.log('projectId', getApp().options.projectId);
+        
         if (user.isInternal && user.role !== 'kandidat') {
           setIsInternalUser(true);
           setInternalReady(true);
@@ -60,14 +62,18 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // Query Riwayat Pribadi - WAJIB FILTER UID
+  // Query Riwayat Pribadi - WAJIB FILTER UID & GUARD READY
   const personalHistoryQuery = useMemo(() => {
-    if (!authReady || !internalReady || !isInternalUser || !user || !user.uid) return null;
+    if (!authReady || !internalReady || !isInternalUser || !user || !user.uid) {
+      return null;
+    }
+    
+    // SELALU gunakan where("uid", "==", user.uid)
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
       orderBy('tsServer', 'desc'),
-      limit(20)
+      limit(50)
     );
   }, [authReady, internalReady, isInternalUser, user, db]);
 
@@ -83,6 +89,7 @@ export default function AbsenPage() {
 
   useEffect(() => {
     if (!authReady || !internalReady || !isInternalUser) return;
+    
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         setLocation({
@@ -137,7 +144,11 @@ export default function AbsenPage() {
         }
       } catch (err: any) {
         console.warn('Firestore error in checkGeofence:', err);
-        setGeofenceError('Gagal memuat data lokasi kantor.');
+        if (err.code === 'permission-denied') {
+          setGeofenceError('Akses lokasi ditolak oleh server.');
+        } else {
+          setGeofenceError('Gagal memuat data lokasi kantor.');
+        }
         setGeofenceChecked(true);
       }
     };
