@@ -2,53 +2,43 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // Helper to check if user has a privileged role
-    // Uses safer property access with .get() to prevent evaluation errors
+    // Minimal and robust privilege check following HRP pattern
     function isPrivileged() {
       return request.auth != null && (
-        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
-         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'none') in ['hrd', 'manager', 'superadmin']) ||
         exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
         exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
-        exists(/databases/$(database)/documents/roles_manager/$(request.auth.uid))
+        exists(/databases/$(database)/documents/roles_manager/$(request.auth.uid)) ||
+        (exists(/databases/$(database)/documents/users/$(request.auth.uid)) && 
+         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.get('role', 'none') in ['hrd', 'manager', 'superadmin'])
       );
     }
 
-    // User profiles
+    // User profiles: Users can read/write their own; Admins can read all.
     match /users/{uid} {
       allow read: if request.auth != null && (request.auth.uid == uid || isPrivileged());
       allow write: if request.auth != null && request.auth.uid == uid;
     }
 
-    // Role fallbacks
-    match /roles_admin/{uid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-    }
-    match /roles_hrd/{uid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-    }
-    match /roles_manager/{uid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-    }
+    // Role markers: Accessible to the owner for role resolution fallbacks
+    match /roles_admin/{uid} { allow read: if request.auth != null && request.auth.uid == uid; }
+    match /roles_hrd/{uid} { allow read: if request.auth != null && request.auth.uid == uid; }
+    match /roles_manager/{uid} { allow read: if request.auth != null && request.auth.uid == uid; }
 
-    // Attendance Events
+    // Attendance Events: 
+    // - Employees can only read their own (requires query filter where('uid', '==', auth.uid))
+    // - Privileged roles (Admin/HRD/Manager) can read all.
+    // - All client-side writes are denied; handled by secure Cloud Functions.
     match /attendance_events/{event} {
-      // Admins can list all, users can only list their own (requires query filter)
-      // Admins can get any, users can only get their own
       allow read: if request.auth != null && (
         isPrivileged() || 
-        (resource != null && resource.data.uid == request.auth.uid)
+        resource.data.uid == request.auth.uid
       );
-      
-      // Writes are handled by the Cloud Function (submitAttendance) which uses Admin SDK
       allow write: if false;
     }
 
-    // Work Locations
+    // Work Locations: All authenticated users can read for geofencing. Only privileged can manage.
     match /work_locations/{loc} {
-      // All authenticated users can list work locations for geofencing
-      allow get, list: if request.auth != null;
-      // Only privileged users can manage locations
+      allow read: if request.auth != null;
       allow write: if isPrivileged();
     }
   }
