@@ -1,4 +1,3 @@
-
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
@@ -12,7 +11,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { MapPin, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, Info, AlertCircle, History, Clock, RefreshCw, Building2, Briefcase } from 'lucide-react';
+import { MapPin, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, Info, AlertCircle, History, Clock, RefreshCw, Building2 } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
@@ -41,31 +40,17 @@ export default function AbsenPage() {
   
   const deviceId = useDeviceId();
 
-  // Debugging user fields as requested
-  useEffect(() => {
-    if (!userLoading && user) {
-      console.log("debug user fields", { 
-        uid: user.uid,
-        displayName: user.displayName,
-        email: user.email,
-        role: user.role,
-        brand: user.brandName 
-      });
-    }
-  }, [user, userLoading]);
+  // ABSEN FIX (MATCH EXACT COLLECTION NAMES FROM ERROR):
+  // attendance_events + work_locations
 
-  // Guard: Verifikasi Auth dan Role Internal
   useEffect(() => {
     if (!userLoading) {
       setAuthReady(true);
       if (user) {
+        console.log('projectId', getApp().options.projectId);
         if (user.isInternal && user.role !== 'kandidat') {
           setIsInternalUser(true);
           setInternalReady(true);
-          // Log verifikasi sekali
-          try {
-            console.log('projectId', getApp().options.projectId);
-          } catch (e) {}
         } else {
           router.push('/unauthorized');
         }
@@ -75,9 +60,9 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // Query Riwayat Pribadi
+  // Query Riwayat Pribadi - WAJIB FILTER UID
   const personalHistoryQuery = useMemo(() => {
-    if (!authReady || !internalReady || !isInternalUser || !user) return null;
+    if (!authReady || !internalReady || !isInternalUser || !user || !user.uid) return null;
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
@@ -96,7 +81,6 @@ export default function AbsenPage() {
     return eventDate >= today ? events[0] : null;
   }, [events]);
 
-  // Pantau Lokasi Real-time
   useEffect(() => {
     if (!authReady || !internalReady || !isInternalUser) return;
     const watchId = navigator.geolocation.watchPosition(
@@ -120,7 +104,6 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [authReady, internalReady, isInternalUser, toast]);
 
-  // Cek Geofence
   useEffect(() => {
     const checkGeofence = async () => {
       if (!authReady || !internalReady || !isInternalUser || !location || geofenceChecked) return;
@@ -212,17 +195,13 @@ export default function AbsenPage() {
 
   const type = lastEvent?.type === 'IN' ? 'OUT' : 'IN';
   const mode = isWithinRadius ? 'ONSITE' : 'OFFSITE';
-  
-  // Resolve userName for Avatar and Title
   const userName = user?.displayName || 'User';
   const userInitials = userName.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase() || 'U';
 
   return (
     <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto relative overflow-hidden">
-      {/* Soft Background Gradient Effect */}
       <div className="absolute top-0 left-0 w-full h-64 bg-gradient-to-b from-primary/10 to-transparent -z-10" />
 
-      {/* Header Identitas Modern */}
       <div className="p-6 pb-2">
         <div className="flex justify-between items-start mb-6">
           <div className="flex items-center gap-4">
@@ -253,7 +232,6 @@ export default function AbsenPage() {
           </Button>
         </div>
 
-        {/* Banner Konfirmasi Akun */}
         <div className="bg-white/50 backdrop-blur-sm border border-white rounded-2xl p-4 flex items-center gap-3 shadow-sm mb-6">
           <div className="w-8 h-8 rounded-full bg-primary/10 flex items-center justify-center text-primary">
             <Info className="w-4 h-4" />
@@ -303,7 +281,6 @@ export default function AbsenPage() {
               </div>
 
               <div className="relative mb-8">
-                {/* Visual feedback rings */}
                 <div className={`absolute inset-0 rounded-full animate-ping opacity-20 ${type === 'IN' ? 'bg-primary' : 'bg-secondary'}`} />
                 
                 <button
@@ -355,7 +332,6 @@ export default function AbsenPage() {
           </Card>
         )}
 
-        {/* Riwayat Pribadi Section */}
         <div className="flex flex-col min-h-0 pb-10">
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">

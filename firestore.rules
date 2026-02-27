@@ -6,10 +6,6 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isInternal() {
-      return isSignedIn() && exists(/databases/$(database)/documents/users/$(request.auth.uid));
-    }
-
     // User Profile
     match /users/{uid} {
       allow read: if isSignedIn() && (request.auth.uid == uid || 
@@ -20,18 +16,18 @@ service cloud.firestore {
 
     // Lokasi Kantor: Dibaca oleh semua user internal untuk geofencing
     match /work_locations/{locationId} {
-      allow get, list: if isSignedIn();
-      allow create, update, delete: if isSignedIn() && 
-        (exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) || 
-         exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)));
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (
+        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) || 
+        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)));
     }
 
     // Kejadian Absensi: HANYA boleh baca milik sendiri (kecuali Admin/HRD)
     match /attendance_events/{eventId} {
-      allow get, list: if isSignedIn() && (
-        resource.data.uid == request.auth.uid ||
-        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
-        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid))
+      allow read: if isSignedIn() && (
+        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) || 
+        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
+        (resource != null && resource.data.uid == request.auth.uid)
       );
       // Penulisan hanya melalui Cloud Function yang aman
       allow write: if false;
