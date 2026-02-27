@@ -71,7 +71,8 @@ export default function AbsenPage() {
         });
       },
       (err) => {
-        console.error(err);
+        // We avoid console.error here to prevent confusing error overlays. 
+        // User notification is handled via the toast.
         toast({
           variant: 'destructive',
           title: 'Location Error',
