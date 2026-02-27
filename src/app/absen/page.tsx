@@ -6,6 +6,7 @@ import { signOut } from 'firebase/auth';
 import { collection, query, where, orderBy, limit, getDocs } from 'firebase/firestore';
 import { httpsCallable, getFunctions } from 'firebase/functions';
 import { useAuth, useFirestore, useUser, useCollection } from '@/firebase';
+import { getApp } from 'firebase/app';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -25,6 +26,10 @@ export default function AbsenPage() {
   const router = useRouter();
   const { toast } = useToast();
   
+  const [authReady, setAuthReady] = useState(false);
+  const [internalReady, setInternalReady] = useState(false);
+  const [isInternalUser, setIsInternalUser] = useState(false);
+
   const [location, setLocation] = useState<{ lat: number; lng: number; accuracy: number } | null>(null);
   const [isWithinRadius, setIsWithinRadius] = useState(false);
   const [isNearBoundary, setIsNearBoundary] = useState(false);
@@ -37,28 +42,47 @@ export default function AbsenPage() {
   
   const deviceId = useDeviceId();
 
-  // Guard: Block candidates or unauthenticated users
+  // Log project ID once on init
+  useEffect(() => {
+    try {
+      console.log('firebase projectId', getApp().options.projectId);
+    } catch (e) {
+      console.error('Failed to get project ID', e);
+    }
+  }, []);
+
+  // Guard: Resolve Auth and Internal Role states
   useEffect(() => {
     if (!userLoading) {
-      if (!user) {
+      setAuthReady(true);
+      if (user) {
+        if (user.isInternal && user.role !== 'kandidat') {
+          setIsInternalUser(true);
+          setInternalReady(true);
+        } else {
+          setIsInternalUser(false);
+          setInternalReady(true);
+          router.push('/unauthorized');
+        }
+      } else {
         router.push('/login');
-      } else if (user.role === 'kandidat' || !user.isInternal) {
-        router.push('/unauthorized');
       }
     }
   }, [user, userLoading, router]);
 
+  // Attendance query: ONLY if guards are passed
   const lastEventQuery = useMemo(() => {
-    if (!user || user.role === 'kandidat' || !user.isInternal) return null;
+    if (!authReady || !internalReady || !isInternalUser || !user) return null;
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
       orderBy('tsServer', 'desc'),
       limit(1)
     );
-  }, [user, db]);
+  }, [authReady, internalReady, isInternalUser, user, db]);
 
   const { data: events } = useCollection(lastEventQuery);
+  
   const lastEvent = useMemo(() => {
     if (!events || events.length === 0) return null;
     const today = new Date();
@@ -68,7 +92,7 @@ export default function AbsenPage() {
   }, [events]);
 
   useEffect(() => {
-    if (!user || user.role === 'kandidat' || !user.isInternal) return;
+    if (!authReady || !internalReady || !isInternalUser) return;
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         setLocation({
@@ -87,12 +111,12 @@ export default function AbsenPage() {
       { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
     );
     return () => navigator.geolocation.clearWatch(watchId);
-  }, [user, toast]);
+  }, [authReady, internalReady, isInternalUser, toast]);
 
   useEffect(() => {
     const checkGeofence = async () => {
-      // Ensure we are logged in, STAFF, and have location before querying
-      if (!location || !user || !user.isInternal || user.role === 'kandidat' || geofenceChecked) return;
+      // Guard: Ensure guards passed and location exists before list work_locations
+      if (!authReady || !internalReady || !isInternalUser || !location || geofenceChecked) return;
       
       try {
         const collRef = collection(db, 'work_locations');
@@ -126,13 +150,12 @@ export default function AbsenPage() {
       }
     };
     
-    // Reset geofence check when location changes significantly
     checkGeofence();
-  }, [location, user, db, geofenceChecked]);
+  }, [authReady, internalReady, isInternalUser, location, db, geofenceChecked]);
 
   useEffect(() => {
     const getExplanation = async () => {
-      if (!location || !user || user.role === 'kandidat' || !user.isInternal) return;
+      if (!authReady || !internalReady || !isInternalUser || !location || !user) return;
       const isAnomaly = location.accuracy > 80 || isNearBoundary || !isWithinRadius;
       
       if (isAnomaly && !anomalyExplanation && !explaining) {
@@ -157,10 +180,10 @@ export default function AbsenPage() {
       }
     };
     getExplanation();
-  }, [location, isWithinRadius, isNearBoundary, workLocation, user, anomalyExplanation, explaining]);
+  }, [authReady, internalReady, isInternalUser, location, isWithinRadius, isNearBoundary, workLocation, user, anomalyExplanation, explaining]);
 
   const handleTap = async (selfieBase64?: string) => {
-    if (!location || !deviceId || !user || user.role === 'kandidat' || !user.isInternal) return;
+    if (!authReady || !internalReady || !isInternalUser || !location || !deviceId || !user) return;
     setSubmitting(true);
 
     const isAnomaly = location.accuracy > 80 || isNearBoundary;
@@ -205,13 +228,15 @@ export default function AbsenPage() {
     }
   };
 
-  if (userLoading || !user || user.role === 'kandidat' || !user.isInternal) {
+  if (!authReady || !internalReady) {
     return (
       <div className="min-h-svh flex items-center justify-center bg-background">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />
       </div>
     );
   }
+
+  if (!isInternalUser || !user) return null;
 
   const type = lastEvent?.type === 'IN' ? 'OUT' : 'IN';
   const mode = isWithinRadius ? 'ONSITE' : 'OFFSITE';
