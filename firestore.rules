@@ -1,14 +1,12 @@
+
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // Lokasi Kantor: Dibaca oleh semua user internal untuk geofencing
-    match /work_locations/{locationId} {
-      allow get, list: if request.auth != null;
-      allow create, update, delete: if request.auth != null && (
-        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
-        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid))
-      );
+    // Konfigurasi Absensi (HRP Managed)
+    match /attendance_config/{configId} {
+      allow get: if request.auth != null;
+      allow list, write: if false; // Hanya diubah via admin portal / HRP
     }
 
     // Profil User
@@ -21,20 +19,24 @@ service cloud.firestore {
       allow write: if request.auth != null && request.auth.uid == uid;
     }
 
-    // Role Markers (Private - Hanya untuk pengecekan internal rules via exists)
+    // Role Markers (Private)
     match /roles_admin/{uid} { allow read, write: if false; }
     match /roles_hrd/{uid} { allow read, write: if false; }
     match /roles_manager/{uid} { allow read, write: if false; }
 
-    // Kejadian Absensi: HANYA boleh baca milik sendiri (kecuali Admin/HRD)
+    // Kejadian Absensi
     match /attendance_events/{eventId} {
-      allow get, list: if request.auth != null && (
+      allow get: if request.auth != null && (
         exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
         exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
         resource.data.uid == request.auth.uid
       );
-      // Penulisan hanya melalui Cloud Function yang aman (submitAttendance)
-      allow write: if false;
+      allow list: if request.auth != null && (
+        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
+        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
+        (request.query.limit <= 100 && request.query.filters.uid == request.auth.uid)
+      );
+      allow write: if false; // Melalui Cloud Function submitAttendance
     }
   }
 }

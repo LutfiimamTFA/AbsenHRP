@@ -1,9 +1,10 @@
+
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { signOut } from 'firebase/auth';
-import { collection, query, where, orderBy, limit, getDocs } from 'firebase/firestore';
+import { collection, query, where, orderBy, limit, getDoc, doc } from 'firebase/firestore';
 import { httpsCallable, getFunctions } from 'firebase/functions';
 import { getApp } from 'firebase/app';
 import { useAuth, useFirestore, useUser, useCollection } from '@/firebase';
@@ -32,23 +33,22 @@ export default function AbsenPage() {
 
   const [location, setLocation] = useState<{ lat: number; lng: number; accuracy: number } | null>(null);
   const [isWithinRadius, setIsWithinRadius] = useState(false);
-  const [workLocation, setWorkLocation] = useState<any>(null);
+  const [attendanceConfig, setAttendanceConfig] = useState<any>(null);
   const [showCamera, setShowCamera] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [geofenceChecked, setGeofenceChecked] = useState(false);
-  const [geofenceError, setGeofenceError] = useState<string | null>(null);
+  const [configLoaded, setConfigLoaded] = useState(false);
+  const [configError, setConfigError] = useState<string | null>(null);
   
   const deviceId = useDeviceId();
-
-  // ABSEN FIX (MATCH EXACT COLLECTION NAMES FROM ERROR):
-  // attendance_events + work_locations
 
   useEffect(() => {
     if (!userLoading) {
       setAuthReady(true);
       if (user) {
-        // Log project ID for verification
-        console.log('projectId', getApp().options.projectId);
+        if (process.env.NODE_ENV === 'development') {
+          console.log('projectId', getApp().options.projectId);
+          console.log('uid', user.uid);
+        }
         
         if (user.isInternal && user.role !== 'kandidat') {
           setIsInternalUser(true);
@@ -62,13 +62,12 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // Query Riwayat Pribadi - WAJIB FILTER UID & GUARD READY
+  // Query Riwayat Pribadi - WAJIB FILTER UID
   const personalHistoryQuery = useMemo(() => {
-    if (!authReady || !internalReady || !isInternalUser || !user || !user.uid) {
+    if (!authReady || !internalReady || !isInternalUser || !user?.uid) {
       return null;
     }
     
-    // SELALU gunakan where("uid", "==", user.uid)
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
@@ -83,7 +82,6 @@ export default function AbsenPage() {
     if (!events || events.length === 0) return null;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    // tsServer bisa null saat transisi sinkronisasi server
     const eventDate = events[0].tsServer?.toDate() || new Date();
     return eventDate >= today ? events[0] : null;
   }, [events]);
@@ -100,7 +98,6 @@ export default function AbsenPage() {
         });
       },
       (err) => {
-        console.warn('Geolocation error:', err);
         toast({
           variant: 'destructive',
           title: 'Gagal Akses GPS',
@@ -113,49 +110,54 @@ export default function AbsenPage() {
   }, [authReady, internalReady, isInternalUser, toast]);
 
   useEffect(() => {
-    const checkGeofence = async () => {
-      if (!authReady || !internalReady || !isInternalUser || !location || geofenceChecked) return;
+    const loadConfig = async () => {
+      if (!authReady || !internalReady || !isInternalUser || configLoaded) return;
       
       try {
-        const locationsSnap = await getDocs(collection(db, 'work_locations'));
+        const configRef = doc(db, 'attendance_config', 'default');
+        const snap = await getDoc(configRef);
         
-        if (locationsSnap.empty) {
-          setGeofenceError('Lokasi kantor belum diatur. Hubungi Admin/HRD.');
-          setGeofenceChecked(true);
+        if (!snap.exists()) {
+          setConfigError('Konfigurasi absensi belum diatur di HRP.');
+          setConfigLoaded(true);
           return;
         }
 
-        let nearest: any = null;
-        let minDistance = Infinity;
-
-        locationsSnap.forEach((doc) => {
-          const data = doc.data();
-          const dist = getDistance(location.lat, location.lng, data.center.lat, data.center.lng);
-          if (dist < minDistance) {
-            minDistance = dist;
-            nearest = data;
-          }
-        });
-
-        if (nearest) {
-          setWorkLocation(nearest);
-          setIsWithinRadius(minDistance <= nearest.radiusM);
-          setGeofenceChecked(true);
-          setGeofenceError(null);
+        const data = snap.data();
+        if (process.env.NODE_ENV === 'development') {
+          console.log('attendance_config load success', data);
         }
-      } catch (err: any) {
-        console.warn('Firestore error in checkGeofence:', err);
-        if (err.code === 'permission-denied') {
-          setGeofenceError('Akses lokasi ditolak oleh server.');
+
+        if (!data.office || typeof data.office.lat !== 'number' || typeof data.office.lng !== 'number') {
+          setConfigError('Lokasi kantor belum lengkap diatur di HRP.');
         } else {
-          setGeofenceError('Gagal memuat data lokasi kantor.');
+          setAttendanceConfig(data);
+          setConfigError(null);
         }
-        setGeofenceChecked(true);
+        setConfigLoaded(true);
+      } catch (err: any) {
+        console.error('Error loading attendance_config:', err);
+        setConfigError(err.code === 'permission-denied' 
+          ? 'Anda tidak memiliki izin membaca konfigurasi.' 
+          : 'Gagal memuat konfigurasi absensi.');
+        setConfigLoaded(true);
       }
     };
     
-    checkGeofence();
-  }, [authReady, internalReady, isInternalUser, location, db, geofenceChecked]);
+    loadConfig();
+  }, [authReady, internalReady, isInternalUser, db, configLoaded]);
+
+  useEffect(() => {
+    if (location && attendanceConfig?.office) {
+      const dist = getDistance(
+        location.lat, 
+        location.lng, 
+        attendanceConfig.office.lat, 
+        attendanceConfig.office.lng
+      );
+      setIsWithinRadius(dist <= (attendanceConfig.office.radiusM || 100));
+    }
+  }, [location, attendanceConfig]);
 
   const handleTap = async (selfieBase64?: string) => {
     if (!authReady || !internalReady || !isInternalUser || !location || !deviceId || !user) return;
@@ -253,27 +255,27 @@ export default function AbsenPage() {
               Anda login sebagai <span className="text-foreground font-bold">{userName}</span> ({user?.brandName}).
             </p>
             <p className="text-[10px] text-muted-foreground italic">
-              Khusus absensi & riwayat pribadi. Monitoring HRD di portal HRP.
+              Web ini khusus absensi & riwayat pribadi. Monitoring ada di HRP.
             </p>
           </div>
         </div>
       </div>
 
       <div className="px-6 flex-1 flex flex-col gap-6">
-        {geofenceError ? (
+        {configError ? (
           <Card className="border-none shadow-xl rounded-[2rem] bg-white overflow-hidden p-8 text-center animate-in fade-in zoom-in duration-300">
             <div className="w-16 h-16 bg-destructive/10 text-destructive rounded-full flex items-center justify-center mx-auto mb-4">
               <AlertCircle className="w-8 h-8" />
             </div>
-            <h2 className="text-lg font-bold text-foreground mb-2">Lokasi kantor belum diatur</h2>
+            <h2 className="text-lg font-bold text-foreground mb-2">Masalah Konfigurasi</h2>
             <p className="text-sm text-muted-foreground mb-6 leading-relaxed">
-              Sistem tidak dapat mendeteksi zona absensi Anda. Silakan hubungi Admin atau HRD untuk mengatur lokasi kantor.
+              {configError}
             </p>
             <Button 
-              onClick={() => { setGeofenceChecked(false); setGeofenceError(null); }} 
+              onClick={() => { setConfigLoaded(false); setConfigError(null); }} 
               className="rounded-full w-full h-12 gap-2"
             >
-              <RefreshCw className="w-4 h-4" /> Muat Ulang
+              <RefreshCw className="w-4 h-4" /> Coba Lagi
             </Button>
           </Card>
         ) : (
@@ -297,11 +299,11 @@ export default function AbsenPage() {
                 
                 <button
                   onClick={() => handleTap()}
-                  disabled={!location || submitting}
+                  disabled={!location || submitting || !configLoaded || !!configError}
                   className={`
                     relative w-52 h-52 rounded-full flex flex-col items-center justify-center gap-1 shadow-2xl transition-all tap-button-active
                     ${type === 'IN' ? 'bg-primary text-white shadow-primary/30' : 'bg-secondary text-white shadow-secondary/30'}
-                    ${(!location || submitting) ? 'opacity-50 grayscale cursor-not-allowed' : 'hover:scale-105'}
+                    ${(!location || submitting || !configLoaded || !!configError) ? 'opacity-50 grayscale cursor-not-allowed' : 'hover:scale-105'}
                   `}
                 >
                   {submitting ? (
@@ -323,16 +325,16 @@ export default function AbsenPage() {
                 <div className="p-4 rounded-[1.8rem] bg-muted/40 text-left border border-white">
                   <div className="flex items-center gap-2 mb-1.5">
                     <Building2 className="w-3.5 h-3.5 text-muted-foreground" />
-                    <p className="text-[9px] text-muted-foreground font-black uppercase tracking-wider">Lokasi</p>
+                    <p className="text-[9px] text-muted-foreground font-black uppercase tracking-wider">Status</p>
                   </div>
                   <div className="font-bold text-sm truncate text-foreground">
-                    {isWithinRadius ? workLocation?.name : 'Luar Jangkauan'}
+                    {isWithinRadius ? 'Dalam Kantor' : 'Luar Jangkauan'}
                   </div>
                 </div>
                 <div className="p-4 rounded-[1.8rem] bg-muted/40 text-left border border-white">
                   <div className="flex items-center gap-2 mb-1.5">
                     <MapPin className="w-3.5 h-3.5 text-muted-foreground" />
-                    <p className="text-[9px] text-muted-foreground font-black uppercase tracking-wider">GPS Akurasi</p>
+                    <p className="text-[9px] text-muted-foreground font-black uppercase tracking-wider">Akurasi</p>
                   </div>
                   <div className="flex items-center gap-2 font-bold text-sm text-foreground">
                     {location ? `${location.accuracy.toFixed(0)}m` : '--'}

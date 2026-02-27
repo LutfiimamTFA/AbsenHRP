@@ -10,15 +10,33 @@
         "email": { "type": "string" },
         "displayName": { "type": "string" },
         "role": { "type": "string", "enum": ["employee", "karyawan", "hrd", "manager", "superadmin"] },
-        "primaryDeviceId": { "type": "string" }
+        "primaryDeviceId": { "type": "string" },
+        "brandName": { "type": "string" },
+        "division": { "type": "string" }
       }
     },
-    "RoleMarker": {
-      "title": "Role Marker",
-      "description": "Empty document used to flag roles for specific UIDs in fallback collections.",
+    "AttendanceConfig": {
+      "title": "Attendance Configuration",
+      "description": "Global settings for office geofencing and shifts, managed by HRP.",
       "type": "object",
       "properties": {
-        "uid": { "type": "string" }
+        "office": {
+          "type": "object",
+          "properties": {
+            "lat": { "type": "number" },
+            "lng": { "type": "number" },
+            "radiusM": { "type": "number" }
+          }
+        },
+        "shift": {
+          "type": "object",
+          "properties": {
+            "startTime": { "type": "string" },
+            "endTime": { "type": "string" },
+            "graceLateMinutes": { "type": "number" },
+            "timezone": { "type": "string" }
+          }
+        }
       }
     },
     "AttendanceEvent": {
@@ -42,23 +60,6 @@
         "deviceId": { "type": "string" },
         "flags": { "type": "array", "items": { "type": "string" } }
       }
-    },
-    "WorkLocation": {
-      "title": "Work Location",
-      "description": "Geofenced work areas for onsite attendance.",
-      "type": "object",
-      "properties": {
-        "name": { "type": "string" },
-        "center": {
-          "type": "object",
-          "properties": {
-            "lat": { "type": "number" },
-            "lng": { "type": "number" }
-          }
-        },
-        "radiusM": { "type": "number" }
-      },
-      "required": ["name", "center", "radiusM"]
     }
   },
   "auth": {
@@ -69,25 +70,13 @@
       "schema": { "$ref": "#/entities/User" },
       "description": "Primary user profiles and roles."
     },
-    "/roles_admin/{uid}": {
-      "schema": { "$ref": "#/entities/RoleMarker" },
-      "description": "Marker collection for superadmin fallback."
-    },
-    "/roles_hrd/{uid}": {
-      "schema": { "$ref": "#/entities/RoleMarker" },
-      "description": "Marker collection for HRD fallback."
-    },
-    "/roles_manager/{uid}": {
-      "schema": { "$ref": "#/entities/RoleMarker" },
-      "description": "Marker collection for manager fallback."
+    "/attendance_config/{configId}": {
+      "schema": { "$ref": "#/entities/AttendanceConfig" },
+      "description": "Global attendance settings (office & shift)."
     },
     "/attendance_events/{eventId}": {
       "schema": { "$ref": "#/entities/AttendanceEvent" },
       "description": "Clock events."
-    },
-    "/work_locations/{locId}": {
-      "schema": { "$ref": "#/entities/WorkLocation" },
-      "description": "Configured work zones."
     }
   }
 }
