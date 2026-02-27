@@ -1,3 +1,4 @@
+
 'use client';
 
 import { useEffect, useState } from 'react';
@@ -14,6 +15,9 @@ export interface ExtendedUser {
   role: UserRole;
   isPrivileged: boolean;
   isInternal: boolean;
+  brandName?: string;
+  brandId?: string;
+  division?: string;
 }
 
 export function useUser() {
@@ -35,9 +39,18 @@ export function useUser() {
         let resolvedRole: UserRole = 'employee';
         const userDocRef = doc(db, 'users', firebaseUser.uid);
         const userDoc = await getDoc(userDocRef);
+        const userData = userDoc.data();
         
-        if (userDoc.exists() && userDoc.data()?.role) {
-          resolvedRole = userDoc.data().role;
+        if (userDoc.exists() && userData?.role) {
+          resolvedRole = userData.role;
+        }
+
+        let brandName = userData?.brandName;
+        if (!brandName && userData?.brandId) {
+          const brandDoc = await getDoc(doc(db, 'brands', userData.brandId));
+          if (brandDoc.exists()) {
+            brandName = brandDoc.data()?.name;
+          }
         }
 
         // Definisi Peran Internal (Semua staf HRP)
@@ -50,10 +63,13 @@ export function useUser() {
         setUser({
           uid: firebaseUser.uid,
           email: firebaseUser.email,
-          displayName: firebaseUser.displayName || userDoc.data()?.name || null,
+          displayName: userData?.displayName || userData?.name || firebaseUser.displayName || null,
           role: resolvedRole,
           isPrivileged,
-          isInternal
+          isInternal,
+          brandName: brandName || "Brand belum diatur",
+          brandId: userData?.brandId,
+          division: userData?.division
         });
       } catch (err) {
         setUser({
