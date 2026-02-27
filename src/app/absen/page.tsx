@@ -6,18 +6,16 @@ import { signOut } from 'firebase/auth';
 import { collection, query, where, orderBy, limit, getDocs } from 'firebase/firestore';
 import { httpsCallable, getFunctions } from 'firebase/functions';
 import { useAuth, useFirestore, useUser, useCollection } from '@/firebase';
-import { getApp } from 'firebase/app';
 import { Button } from '@/components/ui/button';
-import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
+import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, LayoutDashboard, Info, AlertCircle } from 'lucide-react';
+import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, Info, AlertCircle, History, Clock } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
 import { CameraCapture } from '@/components/camera-capture';
-import { errorEmitter } from '@/firebase/error-emitter';
-import { FirestorePermissionError } from '@/firebase/errors';
-import { explainAttendanceAnomaly } from '@/ai/flows/explain-attendance-anomaly';
+import { format } from 'date-fns';
+import { id } from 'date-fns/locale';
 
 export default function AbsenPage() {
   const { user, loading: userLoading } = useUser();
@@ -32,27 +30,15 @@ export default function AbsenPage() {
 
   const [location, setLocation] = useState<{ lat: number; lng: number; accuracy: number } | null>(null);
   const [isWithinRadius, setIsWithinRadius] = useState(false);
-  const [isNearBoundary, setIsNearBoundary] = useState(false);
   const [workLocation, setWorkLocation] = useState<any>(null);
   const [showCamera, setShowCamera] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [anomalyExplanation, setAnomalyExplanation] = useState<string | null>(null);
-  const [explaining, setExplaining] = useState(false);
   const [geofenceChecked, setGeofenceChecked] = useState(false);
   const [geofenceError, setGeofenceError] = useState<string | null>(null);
   
   const deviceId = useDeviceId();
 
-  // Log project ID once on init for verification
-  useEffect(() => {
-    try {
-      console.log('projectId', getApp().options.projectId);
-    } catch (e) {
-      console.error('Failed to get project ID', e);
-    }
-  }, []);
-
-  // Guard: Resolve Auth and Internal Role states before any Firestore operations
+  // Guard: Verifikasi Auth dan Role Internal
   useEffect(() => {
     if (!userLoading) {
       setAuthReady(true);
@@ -61,8 +47,6 @@ export default function AbsenPage() {
           setIsInternalUser(true);
           setInternalReady(true);
         } else {
-          setIsInternalUser(false);
-          setInternalReady(true);
           router.push('/unauthorized');
         }
       } else {
@@ -71,18 +55,18 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // Attendance query: EXACT collection name "attendance_events" and mandatory UID filter
-  const lastEventQuery = useMemo(() => {
+  // Query Riwayat Pribadi: WAJIB filter UID dan urutkan tsServer desc
+  const personalHistoryQuery = useMemo(() => {
     if (!authReady || !internalReady || !isInternalUser || !user) return null;
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
       orderBy('tsServer', 'desc'),
-      limit(1)
+      limit(10)
     );
   }, [authReady, internalReady, isInternalUser, user, db]);
 
-  const { data: events } = useCollection(lastEventQuery);
+  const { data: events, loading: eventsLoading } = useCollection(personalHistoryQuery);
   
   const lastEvent = useMemo(() => {
     if (!events || events.length === 0) return null;
@@ -92,6 +76,7 @@ export default function AbsenPage() {
     return eventDate >= today ? events[0] : null;
   }, [events]);
 
+  // Pantau Lokasi Real-time
   useEffect(() => {
     if (!authReady || !internalReady || !isInternalUser) return;
     const watchId = navigator.geolocation.watchPosition(
@@ -106,8 +91,8 @@ export default function AbsenPage() {
         console.warn('Geolocation error:', err);
         toast({
           variant: 'destructive',
-          title: 'Location Error',
-          description: 'Please enable GPS for attendance.',
+          title: 'Gagal Akses GPS',
+          description: 'Mohon izinkan akses lokasi untuk melakukan absensi.',
         });
       },
       { enableHighAccuracy: true, timeout: 5000, maximumAge: 0 }
@@ -115,19 +100,16 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [authReady, internalReady, isInternalUser, toast]);
 
-  // Geofence check: EXACT collection name "work_locations" and strict readiness guards
+  // Cek Geofence: Hanya ambil lokasi kantor jika user sudah terverifikasi
   useEffect(() => {
     const checkGeofence = async () => {
       if (!authReady || !internalReady || !isInternalUser || !location || geofenceChecked) return;
       
       try {
-        const collRef = collection(db, 'work_locations');
-        const locationsSnap = await getDocs(collRef);
-        
-        console.warn('work_locations query result size:', locationsSnap.size);
+        const locationsSnap = await getDocs(collection(db, 'work_locations'));
         
         if (locationsSnap.empty) {
-          setGeofenceError('No work locations configured.');
+          setGeofenceError('Lokasi kantor belum diatur. Hubungi Admin/HRD.');
           setGeofenceChecked(true);
           return;
         }
@@ -147,85 +129,31 @@ export default function AbsenPage() {
         if (nearest) {
           setWorkLocation(nearest);
           setIsWithinRadius(minDistance <= nearest.radiusM);
-          setIsNearBoundary(Math.abs(minDistance - nearest.radiusM) <= 20);
           setGeofenceChecked(true);
           setGeofenceError(null);
         }
       } catch (err: any) {
         console.warn('Firestore error in checkGeofence:', err);
-        if (err.code === 'permission-denied') {
-          const permissionError = new FirestorePermissionError({
-            path: 'work_locations',
-            operation: 'list',
-          });
-          errorEmitter.emit('permission-error', permissionError);
-        }
+        setGeofenceError('Gagal memuat data lokasi kantor.');
+        setGeofenceChecked(true);
       }
     };
     
     checkGeofence();
   }, [authReady, internalReady, isInternalUser, location, db, geofenceChecked]);
 
-  useEffect(() => {
-    const getExplanation = async () => {
-      if (!authReady || !internalReady || !isInternalUser || !location || !user || !geofenceChecked) return;
-      
-      const isAnomaly = location.accuracy > 80 || isNearBoundary || !isWithinRadius;
-      
-      // Stop explaining if we already have one or are currently fetching
-      if (!isAnomaly) {
-        setAnomalyExplanation(null);
-        return;
-      }
-
-      if (anomalyExplanation || explaining) return;
-
-      setExplaining(true);
-      
-      // Safety timeout for AI call
-      const timeoutId = setTimeout(() => {
-        if (explaining) {
-          console.warn('AI guidance request timed out');
-          setExplaining(false);
-          setAnomalyExplanation('Anomaly detected. Please take a selfie for confirmation.');
-        }
-      }, 10000);
-
-      try {
-        const result = await explainAttendanceAnomaly({
-          accuracyM: location.accuracy,
-          distanceToBoundaryM: workLocation ? Math.abs(getDistance(location.lat, location.lng, workLocation.center.lat, workLocation.center.lng) - workLocation.radiusM) : null,
-          isNewDevice: false,
-          mode: isWithinRadius ? 'ONSITE' : 'OFFSITE',
-          workLocationName: workLocation?.name,
-          userName: user.displayName || 'User',
-        });
-        setAnomalyExplanation(result.explanation);
-      } catch (error) {
-        console.warn('AI guidance error:', error);
-        setAnomalyExplanation('Contextual verification needed. Please take a selfie to proceed.');
-      } finally {
-        clearTimeout(timeoutId);
-        setExplaining(false);
-      }
-    };
-    
-    getExplanation();
-  }, [authReady, internalReady, isInternalUser, location?.lat, location?.lng, location?.accuracy, isWithinRadius, isNearBoundary, workLocation, user, geofenceChecked, anomalyExplanation, explaining]);
-
   const handleTap = async (selfieBase64?: string) => {
     if (!authReady || !internalReady || !isInternalUser || !location || !deviceId || !user) return;
-    setSubmitting(true);
-
-    const isAnomaly = location.accuracy > 80 || isNearBoundary;
-    const mode = isWithinRadius ? 'ONSITE' : 'OFFSITE';
-    const needsSelfie = mode === 'OFFSITE' || isAnomaly;
     
-    if (needsSelfie && !selfieBase64) {
+    // Anomali: Di luar radius atau akurasi GPS buruk (> 80m)
+    const isAnomaly = location.accuracy > 80 || !isWithinRadius;
+    
+    if (isAnomaly && !selfieBase64) {
       setShowCamera(true);
-      setSubmitting(false);
       return;
     }
+
+    setSubmitting(true);
 
     try {
       const functions = getFunctions();
@@ -243,17 +171,15 @@ export default function AbsenPage() {
       });
 
       toast({
-        title: 'Success!',
-        description: `Successfully clocked ${type}.`,
+        title: 'Berhasil!',
+        description: `Berhasil melakukan Tap ${type}.`,
       });
       setShowCamera(false);
-      setAnomalyExplanation(null);
     } catch (error: any) {
-      console.warn('Attendance submission error:', error);
       toast({
         variant: 'destructive',
-        title: 'Submission failed',
-        description: error.message || 'An error occurred.',
+        title: 'Gagal Absen',
+        description: error.message || 'Terjadi kesalahan sistem.',
       });
     } finally {
       setSubmitting(false);
@@ -268,48 +194,41 @@ export default function AbsenPage() {
     );
   }
 
-  if (!isInternalUser || !user) return null;
-
   const type = lastEvent?.type === 'IN' ? 'OUT' : 'IN';
   const mode = isWithinRadius ? 'ONSITE' : 'OFFSITE';
 
   return (
     <div className="min-h-svh bg-background flex flex-col p-6 max-w-md mx-auto">
+      {/* Header User */}
       <div className="flex justify-between items-center mb-8">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-primary/10 rounded-full flex items-center justify-center text-primary relative">
+          <div className="w-10 h-10 bg-primary/10 rounded-full flex items-center justify-center text-primary">
             <UserIcon className="w-5 h-5" />
-            {user.isPrivileged && (
-               <Badge className="absolute -top-2 -right-2 px-1 text-[8px] h-4 bg-orange-500 hover:bg-orange-600">ADMIN</Badge>
-            )}
           </div>
           <div>
-            <h1 className="font-bold text-lg leading-tight">{user.displayName || 'User'}</h1>
-            <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">{user.role}</p>
+            <h1 className="font-bold text-lg leading-tight">{user?.displayName || 'User'}</h1>
+            <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">{user?.role}</p>
           </div>
         </div>
-        <div className="flex gap-2">
-          {user.isPrivileged && (
-            <Button variant="ghost" size="icon" onClick={() => router.push('/absen/admin')} className="text-muted-foreground rounded-full">
-              <LayoutDashboard className="w-5 h-5" />
-            </Button>
-          )}
-          <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="text-muted-foreground rounded-full">
-            <LogOut className="w-5 h-5" />
-          </Button>
-        </div>
+        <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="text-muted-foreground rounded-full">
+          <LogOut className="w-5 h-5" />
+        </Button>
+      </div>
+
+      {/* Info Web Khusus */}
+      <div className="mb-6 px-4 py-2 bg-muted/50 rounded-xl flex items-start gap-3">
+        <Info className="w-4 h-4 text-muted-foreground shrink-0 mt-0.5" />
+        <p className="text-[10px] text-muted-foreground leading-relaxed italic">
+          Web ini khusus untuk absensi dan riwayat pribadi. Monitoring HRD dan laporan perusahaan dapat diakses melalui portal HRP.
+        </p>
       </div>
 
       {geofenceError ? (
         <Card className="border-none shadow-xl rounded-[2.5rem] mb-6 bg-white overflow-hidden p-8 text-center">
           <AlertCircle className="w-12 h-12 text-destructive mx-auto mb-4" />
-          <h2 className="text-xl font-bold mb-2">Location Not Set</h2>
-          <p className="text-sm text-muted-foreground mb-6">Admin needs to configure at least one work location (geofence) in the dashboard.</p>
-          {user.isPrivileged ? (
-            <Button onClick={() => router.push('/absen/admin')} className="rounded-full w-full">Go to Dashboard</Button>
-          ) : (
-            <Button variant="outline" onClick={() => setGeofenceChecked(false)} className="rounded-full w-full">Retry Location</Button>
-          )}
+          <h2 className="text-xl font-bold mb-2">Peringatan</h2>
+          <p className="text-sm text-muted-foreground mb-6">{geofenceError}</p>
+          <Button variant="outline" onClick={() => setGeofenceChecked(false)} className="rounded-full w-full">Coba Lagi</Button>
         </Card>
       ) : (
         <Card className="border-none shadow-xl shadow-primary/5 rounded-[2.5rem] mb-6 bg-white overflow-hidden">
@@ -320,7 +239,7 @@ export default function AbsenPage() {
                   <MapPin className="w-3.5 h-3.5" /> {mode}
                 </Badge>
               ) : (
-                <Badge variant="outline" className="animate-pulse rounded-full px-5 py-1.5">Locating...</Badge>
+                <Badge variant="outline" className="animate-pulse rounded-full px-5 py-1.5">Mencari GPS...</Badge>
               )}
             </div>
 
@@ -338,24 +257,24 @@ export default function AbsenPage() {
               ) : (
                 <>
                   <span className="text-4xl font-black tracking-tighter">TAP {type}</span>
-                  <span className="text-[10px] uppercase font-bold tracking-widest opacity-80">Finish Clock Session</span>
+                  <span className="text-[10px] uppercase font-bold tracking-widest opacity-80">Klik untuk Absen</span>
                 </>
               )}
             </button>
 
-            <div className="grid grid-cols-2 gap-4 w-full mb-2">
+            <div className="grid grid-cols-2 gap-4 w-full">
               <div className="p-4 rounded-[1.5rem] bg-muted/40 text-left">
-                <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1 tracking-wider">Zone</p>
+                <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1 tracking-wider">Zona</p>
                 <div className="flex items-center gap-2 font-bold text-sm">
                   {isWithinRadius ? (
-                    <><CheckCircle2 className="w-4 h-4 text-green-500" /> <span className="truncate">{workLocation?.name || 'Valid'}</span></>
+                    <><CheckCircle2 className="w-4 h-4 text-green-500" /> <span className="truncate">{workLocation?.name || 'Onsite'}</span></>
                   ) : (
                     <><XCircle className="w-4 h-4 text-red-500" /> <span className="text-red-500">Offsite</span></>
                   )}
                 </div>
               </div>
               <div className="p-4 rounded-[1.5rem] bg-muted/40 text-left">
-                <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1 tracking-wider">GPS Signal</p>
+                <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1 tracking-wider">Sinyal GPS</p>
                 <div className="flex items-center gap-2 font-bold text-sm">
                   {location ? `${location.accuracy.toFixed(0)}m` : '--'}
                   {location && location.accuracy > 80 && <AlertTriangle className="w-4 h-4 text-orange-500" />}
@@ -366,30 +285,43 @@ export default function AbsenPage() {
         </Card>
       )}
 
-      {(anomalyExplanation || explaining) && !geofenceError && (
-        <div className="p-5 rounded-[1.8rem] bg-orange-50/80 border border-orange-100 flex items-start gap-3 mb-6 animate-in fade-in slide-in-from-top-2 duration-500">
-          {explaining ? (
-            <Loader2 className="w-5 h-5 text-orange-600 shrink-0 mt-0.5 animate-spin" />
-          ) : (
-            <Info className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
-          )}
-          <div className="text-xs text-orange-900 leading-relaxed">
-            <p className="font-black uppercase tracking-widest text-[10px] mb-1">Notice</p>
-            {explaining ? <p>Generating context-aware guidance...</p> : <p>{anomalyExplanation}</p>}
-          </div>
+      {/* Riwayat Pribadi Real-time */}
+      <div className="mt-4 flex-1 flex flex-col min-h-0">
+        <div className="flex items-center gap-2 mb-4">
+          <History className="w-4 h-4 text-muted-foreground" />
+          <p className="text-[11px] font-black text-muted-foreground uppercase tracking-widest">Riwayat Absen Pribadi</p>
         </div>
-      )}
-
-      <div className="mt-auto pb-4">
-        <p className="text-[9px] font-black text-muted-foreground uppercase text-center mb-4 tracking-[0.2em]">Daily Timeline</p>
-        <div className="flex justify-center items-center gap-4 text-sm font-medium">
-          {lastEvent ? (
-            <div className="flex items-center gap-3 px-5 py-2.5 bg-white rounded-full shadow-sm border border-muted-foreground/10">
-              <Badge variant={lastEvent.type === 'IN' ? 'default' : 'secondary'} className="rounded-full px-2">{lastEvent.type}</Badge>
-              <span className="text-muted-foreground text-xs font-bold">Logged at {lastEvent.tsServer?.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+        
+        <div className="flex-1 overflow-y-auto space-y-3 pb-6">
+          {eventsLoading ? (
+            <div className="flex justify-center p-8"><Loader2 className="w-6 h-6 animate-spin text-muted-foreground" /></div>
+          ) : events?.map((event: any, i: number) => (
+            <div key={i} className="flex items-center justify-between p-4 bg-white rounded-2xl border border-muted-foreground/5 shadow-sm">
+              <div className="flex items-center gap-4">
+                <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${event.type === 'IN' ? 'bg-primary/10 text-primary' : 'bg-secondary/10 text-secondary'}`}>
+                  <Clock className="w-5 h-5" />
+                </div>
+                <div>
+                  <p className="text-xs font-bold text-foreground">TAP {event.type}</p>
+                  <p className="text-[10px] text-muted-foreground">
+                    {event.tsServer ? format(event.tsServer.toDate(), 'eeee, d MMM yyyy', { locale: id }) : 'Pending'}
+                  </p>
+                </div>
+              </div>
+              <div className="text-right">
+                <p className="text-sm font-black text-foreground">
+                  {event.tsServer ? format(event.tsServer.toDate(), 'HH:mm') : '--:--'}
+                </p>
+                <Badge variant="outline" className="text-[9px] h-4 py-0 font-bold uppercase tracking-tighter">
+                  {event.mode}
+                </Badge>
+              </div>
             </div>
-          ) : (
-            <span className="text-muted-foreground italic text-[10px] font-bold uppercase tracking-widest opacity-60">First activity of the day</span>
+          ))}
+          {(!events || events.length === 0) && !eventsLoading && (
+            <div className="text-center p-12 bg-muted/20 rounded-3xl border border-dashed">
+              <p className="text-xs text-muted-foreground font-medium">Belum ada riwayat absensi.</p>
+            </div>
           )}
         </div>
       </div>
