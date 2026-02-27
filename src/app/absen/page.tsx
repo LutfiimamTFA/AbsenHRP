@@ -1,4 +1,3 @@
-
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
@@ -17,7 +16,7 @@ import { getDistance } from '@/lib/geo-utils';
 import { CameraCapture } from '@/components/camera-capture';
 import { errorEmitter } from '@/firebase/error-emitter';
 import { FirestorePermissionError } from '@/firebase/errors';
-import { explainAttendanceAnomaly, type AttendanceAnomalyOutput } from '@/ai/flows/explain-attendance-anomaly';
+import { explainAttendanceAnomaly } from '@/ai/flows/explain-attendance-anomaly';
 
 export default function AbsenPage() {
   const { user, loading: userLoading } = useUser();
@@ -86,7 +85,9 @@ export default function AbsenPage() {
 
   useEffect(() => {
     const checkGeofence = async () => {
-      if (!location) return;
+      // Only check geofence if we have a location AND a user
+      if (!location || !user) return;
+      
       try {
         const collRef = collection(db, 'work_locations');
         const locationsSnap = await getDocs(collRef);
@@ -118,9 +119,8 @@ export default function AbsenPage() {
       }
     };
     checkGeofence();
-  }, [location, db]);
+  }, [location, user, db]);
 
-  // AI Anomaly Explanation Logic
   useEffect(() => {
     const getExplanation = async () => {
       if (!location || !user) return;
@@ -132,14 +132,14 @@ export default function AbsenPage() {
           const result = await explainAttendanceAnomaly({
             accuracyM: location.accuracy,
             distanceToBoundaryM: workLocation ? Math.abs(getDistance(location.lat, location.lng, workLocation.center.lat, workLocation.center.lng) - workLocation.radiusM) : null,
-            isNewDevice: false, // For now, simulate false
+            isNewDevice: false,
             mode: isWithinRadius ? 'ONSITE' : 'OFFSITE',
             workLocationName: workLocation?.name,
             userName: user.displayName || 'User',
           });
           setAnomalyExplanation(result.explanation);
         } catch (error) {
-          console.error('AI Explanation failed', error);
+          // Silent fail for AI explanation to not break the main flow
         } finally {
           setExplaining(false);
         }
@@ -148,7 +148,7 @@ export default function AbsenPage() {
       }
     };
     getExplanation();
-  }, [location, isWithinRadius, isNearBoundary, workLocation, user]);
+  }, [location, isWithinRadius, isNearBoundary, workLocation, user, anomalyExplanation, explaining]);
 
   const handleTap = async (selfieBase64?: string) => {
     if (!location || !deviceId) return;
@@ -206,7 +206,6 @@ export default function AbsenPage() {
 
   const type = lastEvent?.type === 'IN' ? 'OUT' : 'IN';
   const mode = isWithinRadius ? 'ONSITE' : 'OFFSITE';
-  const isAnomaly = (location?.accuracy || 0) > 80 || isNearBoundary;
 
   return (
     <div className="min-h-svh bg-background flex flex-col p-6 max-w-md mx-auto">
