@@ -32,7 +32,7 @@ export default function AbsenPage() {
   const [isInternalUser, setIsInternalUser] = useState(false);
 
   const [location, setLocation] = useState<{ lat: number; lng: number; accuracy: number } | null>(null);
-  const [isWithinRadius, setIsWithinRadius] = useState(false);
+  const [zone, setZone] = useState<'onsite' | 'offsite' | 'unknown'>('unknown');
   const [attendanceConfig, setAttendanceConfig] = useState<any>(null);
   const [showCamera, setShowCamera] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -62,7 +62,6 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // Query Riwayat Pribadi - WAJIB FILTER UID
   const personalHistoryQuery = useMemo(() => {
     if (!authReady || !internalReady || !isInternalUser || !user?.uid) {
       return null;
@@ -149,20 +148,55 @@ export default function AbsenPage() {
 
   useEffect(() => {
     if (location && attendanceConfig?.office) {
-      const dist = getDistance(
+      const distM = getDistance(
         location.lat, 
         location.lng, 
         attendanceConfig.office.lat, 
         attendanceConfig.office.lng
       );
-      setIsWithinRadius(dist <= (attendanceConfig.office.radiusM || 100));
+      
+      const accuracyM = location.accuracy;
+      const radiusM = attendanceConfig.office.radiusM || 100;
+
+      let currentZone: 'onsite' | 'offsite' | 'unknown' = 'unknown';
+      if (accuracyM > 75) {
+        currentZone = 'unknown';
+      } else if (distM <= radiusM) {
+        currentZone = 'onsite';
+      } else {
+        currentZone = 'offsite';
+      }
+      
+      setZone(currentZone);
+
+      if (process.env.NODE_ENV === 'development') {
+        console.log('Geofence Debug:', {
+          officeLat: attendanceConfig.office.lat,
+          officeLng: attendanceConfig.office.lng,
+          userLat: location.lat,
+          userLng: location.lng,
+          distanceM: distM,
+          radiusM: radiusM,
+          accuracyM: accuracyM,
+          zone: currentZone
+        });
+      }
     }
   }, [location, attendanceConfig]);
 
   const handleTap = async (selfieBase64?: string) => {
     if (!authReady || !internalReady || !isInternalUser || !location || !deviceId || !user) return;
     
-    const isAnomaly = location.accuracy > 80 || !isWithinRadius;
+    if (zone === 'unknown') {
+      toast({
+        variant: 'destructive',
+        title: 'Sinyal Lemah',
+        description: 'Mohon tunggu hingga sinyal GPS stabil sebelum absen.',
+      });
+      return;
+    }
+
+    const isAnomaly = zone === 'offsite';
     if (isAnomaly && !selfieBase64) {
       setShowCamera(true);
       return;
@@ -208,7 +242,6 @@ export default function AbsenPage() {
   }
 
   const type = lastEvent?.type === 'IN' ? 'OUT' : 'IN';
-  const mode = isWithinRadius ? 'ONSITE' : 'OFFSITE';
   const userName = user?.displayName || 'User';
   const userInitials = userName.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase() || 'U';
 
@@ -283,10 +316,17 @@ export default function AbsenPage() {
             <CardContent className="pt-8 pb-10 flex flex-col items-center text-center">
               <div className="mb-8">
                 {location ? (
-                  <Badge variant={isWithinRadius ? 'default' : 'secondary'} className="px-5 py-2 rounded-full text-[11px] font-bold gap-2 uppercase tracking-widest shadow-sm">
-                    {isWithinRadius ? <CheckCircle2 className="w-3.5 h-3.5" /> : <AlertTriangle className="w-3.5 h-3.5" />}
-                    Zona {mode}
-                  </Badge>
+                  zone === 'unknown' ? (
+                    <Badge variant="outline" className="px-5 py-2 rounded-full text-[11px] font-bold gap-2 uppercase tracking-widest shadow-sm text-orange-500 border-orange-200">
+                      <AlertTriangle className="w-3.5 h-3.5" />
+                      GPS Belum Akurat
+                    </Badge>
+                  ) : (
+                    <Badge variant={zone === 'onsite' ? 'default' : 'secondary'} className="px-5 py-2 rounded-full text-[11px] font-bold gap-2 uppercase tracking-widest shadow-sm">
+                      {zone === 'onsite' ? <CheckCircle2 className="w-3.5 h-3.5" /> : <MapPin className="w-3.5 h-3.5" />}
+                      Zona {zone === 'onsite' ? 'Onsite' : 'Offsite'}
+                    </Badge>
+                  )
                 ) : (
                   <Badge variant="outline" className="animate-pulse rounded-full px-5 py-2 text-[11px] font-bold uppercase tracking-widest">
                     Mencari GPS...
@@ -299,11 +339,11 @@ export default function AbsenPage() {
                 
                 <button
                   onClick={() => handleTap()}
-                  disabled={!location || submitting || !configLoaded || !!configError}
+                  disabled={!location || submitting || !configLoaded || !!configError || zone === 'unknown'}
                   className={`
                     relative w-52 h-52 rounded-full flex flex-col items-center justify-center gap-1 shadow-2xl transition-all tap-button-active
                     ${type === 'IN' ? 'bg-primary text-white shadow-primary/30' : 'bg-secondary text-white shadow-secondary/30'}
-                    ${(!location || submitting || !configLoaded || !!configError) ? 'opacity-50 grayscale cursor-not-allowed' : 'hover:scale-105'}
+                    ${(!location || submitting || !configLoaded || !!configError || zone === 'unknown') ? 'opacity-50 grayscale cursor-not-allowed' : 'hover:scale-105'}
                   `}
                 >
                   {submitting ? (
@@ -328,7 +368,7 @@ export default function AbsenPage() {
                     <p className="text-[9px] text-muted-foreground font-black uppercase tracking-wider">Status</p>
                   </div>
                   <div className="font-bold text-sm truncate text-foreground">
-                    {isWithinRadius ? 'Dalam Kantor' : 'Luar Jangkauan'}
+                    {zone === 'onsite' ? 'Dalam Kantor' : zone === 'offsite' ? 'Luar Jangkauan' : 'Sinyal Lemah'}
                   </div>
                 </div>
                 <div className="p-4 rounded-[1.8rem] bg-muted/40 text-left border border-white">
@@ -338,7 +378,7 @@ export default function AbsenPage() {
                   </div>
                   <div className="flex items-center gap-2 font-bold text-sm text-foreground">
                     {location ? `${location.accuracy.toFixed(0)}m` : '--'}
-                    {location && location.accuracy > 80 && <AlertTriangle className="w-4 h-4 text-orange-500" />}
+                    {location && location.accuracy > 75 && <AlertTriangle className="w-4 h-4 text-orange-500" />}
                   </div>
                 </div>
               </div>
