@@ -1,4 +1,3 @@
-
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
@@ -15,6 +14,8 @@ import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
 import { CameraCapture } from '@/components/camera-capture';
+import { errorEmitter } from '@/firebase/error-emitter';
+import { FirestorePermissionError } from '@/firebase/errors';
 
 export default function AbsenPage() {
   const { user, loading: userLoading } = useUser();
@@ -66,7 +67,8 @@ export default function AbsenPage() {
           accuracy: pos.coords.accuracy,
         });
       },
-      () => {
+      (err) => {
+        // Location errors are handled locally
         toast({
           variant: 'destructive',
           title: 'Location Error',
@@ -81,23 +83,34 @@ export default function AbsenPage() {
   useEffect(() => {
     const checkGeofence = async () => {
       if (!location) return;
-      const locationsSnap = await getDocs(collection(db, 'work_locations'));
-      let nearest: any = null;
-      let minDistance = Infinity;
+      try {
+        const collRef = collection(db, 'work_locations');
+        const locationsSnap = await getDocs(collRef);
+        let nearest: any = null;
+        let minDistance = Infinity;
 
-      locationsSnap.forEach((doc) => {
-        const data = doc.data();
-        const dist = getDistance(location.lat, location.lng, data.center.lat, data.center.lng);
-        if (dist < minDistance) {
-          minDistance = dist;
-          nearest = data;
+        locationsSnap.forEach((doc) => {
+          const data = doc.data();
+          const dist = getDistance(location.lat, location.lng, data.center.lat, data.center.lng);
+          if (dist < minDistance) {
+            minDistance = dist;
+            nearest = data;
+          }
+        });
+
+        if (nearest) {
+          setWorkLocation(nearest);
+          setIsWithinRadius(minDistance <= nearest.radiusM);
+          setIsNearBoundary(Math.abs(minDistance - nearest.radiusM) <= 20);
         }
-      });
-
-      if (nearest) {
-        setWorkLocation(nearest);
-        setIsWithinRadius(minDistance <= nearest.radiusM);
-        setIsNearBoundary(Math.abs(minDistance - nearest.radiusM) <= 20);
+      } catch (err: any) {
+        if (err.code === 'permission-denied') {
+          const permissionError = new FirestorePermissionError({
+            path: 'work_locations',
+            operation: 'list',
+          });
+          errorEmitter.emit('permission-error', permissionError);
+        }
       }
     };
     checkGeofence();

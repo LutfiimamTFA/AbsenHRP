@@ -17,20 +17,6 @@ NEXT_PUBLIC_FIREBASE_APP_ID=1:80532457942:web:aa51bae0a3a5bd0b243c77
 NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID=80532457942
 ```
 
-## Testing ONSITE vs OFFSITE
-1. **Setup Location**: In Firestore, create a document in `work_locations`.
-   Example:
-   ```json
-   {
-     "name": "My Office",
-     "center": { "lat": -6.200000, "lng": 106.816666 },
-     "radiusM": 100
-   }
-   ```
-2. **Onsite Test**: Ensure your GPS location is within the defined radius. The button will show `ONSITE` and no selfie is required for normal accuracy.
-3. **Offsite Test**: Step outside the radius. The app will detect `OFFSITE` and prompt for a mandatory selfie.
-4. **Anomaly Test**: If GPS accuracy is poor (>80m) or you are within 20m of the edge, a selfie is required regardless of mode.
-
 ## Security Rules (Apply in Firebase Console)
 
 ### Firestore
@@ -46,6 +32,16 @@ service cloud.firestore {
       allow read: if request.auth != null;
     }
     match /users/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+    }
+    // Roles fallbacks for HRP compatibility
+    match /roles_admin/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+    }
+    match /roles_hrd/{uid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+    }
+    match /roles_manager/{uid} {
       allow read: if request.auth != null && request.auth.uid == uid;
     }
   }
