@@ -10,7 +10,7 @@ import { getApp } from 'firebase/app';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, LayoutDashboard, Info } from 'lucide-react';
+import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, LayoutDashboard, Info, AlertCircle } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
@@ -39,6 +39,7 @@ export default function AbsenPage() {
   const [anomalyExplanation, setAnomalyExplanation] = useState<string | null>(null);
   const [explaining, setExplaining] = useState(false);
   const [geofenceChecked, setGeofenceChecked] = useState(false);
+  const [geofenceError, setGeofenceError] = useState<string | null>(null);
   
   const deviceId = useDeviceId();
 
@@ -102,6 +103,7 @@ export default function AbsenPage() {
         });
       },
       (err) => {
+        console.warn('Geolocation error:', err);
         toast({
           variant: 'destructive',
           title: 'Location Error',
@@ -121,6 +123,15 @@ export default function AbsenPage() {
       try {
         const collRef = collection(db, 'work_locations');
         const locationsSnap = await getDocs(collRef);
+        
+        console.warn('work_locations query result size:', locationsSnap.size);
+        
+        if (locationsSnap.empty) {
+          setGeofenceError('No work locations configured.');
+          setGeofenceChecked(true);
+          return;
+        }
+
         let nearest: any = null;
         let minDistance = Infinity;
 
@@ -138,8 +149,10 @@ export default function AbsenPage() {
           setIsWithinRadius(minDistance <= nearest.radiusM);
           setIsNearBoundary(Math.abs(minDistance - nearest.radiusM) <= 20);
           setGeofenceChecked(true);
+          setGeofenceError(null);
         }
       } catch (err: any) {
+        console.warn('Firestore error in checkGeofence:', err);
         if (err.code === 'permission-denied') {
           const permissionError = new FirestorePermissionError({
             path: 'work_locations',
@@ -155,32 +168,50 @@ export default function AbsenPage() {
 
   useEffect(() => {
     const getExplanation = async () => {
-      if (!authReady || !internalReady || !isInternalUser || !location || !user) return;
+      if (!authReady || !internalReady || !isInternalUser || !location || !user || !geofenceChecked) return;
+      
       const isAnomaly = location.accuracy > 80 || isNearBoundary || !isWithinRadius;
       
-      if (isAnomaly && !anomalyExplanation && !explaining) {
-        setExplaining(true);
-        try {
-          const result = await explainAttendanceAnomaly({
-            accuracyM: location.accuracy,
-            distanceToBoundaryM: workLocation ? Math.abs(getDistance(location.lat, location.lng, workLocation.center.lat, workLocation.center.lng) - workLocation.radiusM) : null,
-            isNewDevice: false,
-            mode: isWithinRadius ? 'ONSITE' : 'OFFSITE',
-            workLocationName: workLocation?.name,
-            userName: user.displayName || 'User',
-          });
-          setAnomalyExplanation(result.explanation);
-        } catch (error) {
-          // Silent fail for AI explanation
-        } finally {
-          setExplaining(false);
-        }
-      } else if (!isAnomaly) {
+      // Stop explaining if we already have one or are currently fetching
+      if (!isAnomaly) {
         setAnomalyExplanation(null);
+        return;
+      }
+
+      if (anomalyExplanation || explaining) return;
+
+      setExplaining(true);
+      
+      // Safety timeout for AI call
+      const timeoutId = setTimeout(() => {
+        if (explaining) {
+          console.warn('AI guidance request timed out');
+          setExplaining(false);
+          setAnomalyExplanation('Anomaly detected. Please take a selfie for confirmation.');
+        }
+      }, 10000);
+
+      try {
+        const result = await explainAttendanceAnomaly({
+          accuracyM: location.accuracy,
+          distanceToBoundaryM: workLocation ? Math.abs(getDistance(location.lat, location.lng, workLocation.center.lat, workLocation.center.lng) - workLocation.radiusM) : null,
+          isNewDevice: false,
+          mode: isWithinRadius ? 'ONSITE' : 'OFFSITE',
+          workLocationName: workLocation?.name,
+          userName: user.displayName || 'User',
+        });
+        setAnomalyExplanation(result.explanation);
+      } catch (error) {
+        console.warn('AI guidance error:', error);
+        setAnomalyExplanation('Contextual verification needed. Please take a selfie to proceed.');
+      } finally {
+        clearTimeout(timeoutId);
+        setExplaining(false);
       }
     };
+    
     getExplanation();
-  }, [authReady, internalReady, isInternalUser, location, isWithinRadius, isNearBoundary, workLocation, user, anomalyExplanation, explaining]);
+  }, [authReady, internalReady, isInternalUser, location?.lat, location?.lng, location?.accuracy, isWithinRadius, isNearBoundary, workLocation, user, geofenceChecked, anomalyExplanation, explaining]);
 
   const handleTap = async (selfieBase64?: string) => {
     if (!authReady || !internalReady || !isInternalUser || !location || !deviceId || !user) return;
@@ -218,6 +249,7 @@ export default function AbsenPage() {
       setShowCamera(false);
       setAnomalyExplanation(null);
     } catch (error: any) {
+      console.warn('Attendance submission error:', error);
       toast({
         variant: 'destructive',
         title: 'Submission failed',
@@ -268,60 +300,73 @@ export default function AbsenPage() {
         </div>
       </div>
 
-      <Card className="border-none shadow-xl shadow-primary/5 rounded-[2.5rem] mb-6 bg-white overflow-hidden">
-        <CardContent className="pt-8 flex flex-col items-center text-center">
-          <div className="mb-6">
-            {location ? (
-              <Badge variant={isWithinRadius ? 'default' : 'secondary'} className="px-5 py-1.5 rounded-full text-xs font-semibold gap-2">
-                <MapPin className="w-3.5 h-3.5" /> {mode}
-              </Badge>
-            ) : (
-              <Badge variant="outline" className="animate-pulse rounded-full px-5 py-1.5">Locating...</Badge>
-            )}
-          </div>
+      {geofenceError ? (
+        <Card className="border-none shadow-xl rounded-[2.5rem] mb-6 bg-white overflow-hidden p-8 text-center">
+          <AlertCircle className="w-12 h-12 text-destructive mx-auto mb-4" />
+          <h2 className="text-xl font-bold mb-2">Location Not Set</h2>
+          <p className="text-sm text-muted-foreground mb-6">Admin needs to configure at least one work location (geofence) in the dashboard.</p>
+          {user.isPrivileged ? (
+            <Button onClick={() => router.push('/absen/admin')} className="rounded-full w-full">Go to Dashboard</Button>
+          ) : (
+            <Button variant="outline" onClick={() => setGeofenceChecked(false)} className="rounded-full w-full">Retry Location</Button>
+          )}
+        </Card>
+      ) : (
+        <Card className="border-none shadow-xl shadow-primary/5 rounded-[2.5rem] mb-6 bg-white overflow-hidden">
+          <CardContent className="pt-8 flex flex-col items-center text-center">
+            <div className="mb-6">
+              {location ? (
+                <Badge variant={isWithinRadius ? 'default' : 'secondary'} className="px-5 py-1.5 rounded-full text-xs font-semibold gap-2">
+                  <MapPin className="w-3.5 h-3.5" /> {mode}
+                </Badge>
+              ) : (
+                <Badge variant="outline" className="animate-pulse rounded-full px-5 py-1.5">Locating...</Badge>
+              )}
+            </div>
 
-          <button
-            onClick={() => handleTap()}
-            disabled={!location || submitting}
-            className={`
-              relative w-52 h-52 rounded-full flex flex-col items-center justify-center gap-2 shadow-2xl transition-all tap-button-active mb-8
-              ${type === 'IN' ? 'bg-primary text-white shadow-primary/30' : 'bg-secondary text-white shadow-secondary/30'}
-              ${(!location || submitting) ? 'opacity-50 grayscale cursor-not-allowed' : ''}
-            `}
-          >
-            {submitting ? (
-              <Loader2 className="w-12 h-12 animate-spin" />
-            ) : (
-              <>
-                <span className="text-4xl font-black tracking-tighter">TAP {type}</span>
-                <span className="text-[10px] uppercase font-bold tracking-widest opacity-80">Finish Clock Session</span>
-              </>
-            )}
-          </button>
+            <button
+              onClick={() => handleTap()}
+              disabled={!location || submitting}
+              className={`
+                relative w-52 h-52 rounded-full flex flex-col items-center justify-center gap-2 shadow-2xl transition-all tap-button-active mb-8
+                ${type === 'IN' ? 'bg-primary text-white shadow-primary/30' : 'bg-secondary text-white shadow-secondary/30'}
+                ${(!location || submitting) ? 'opacity-50 grayscale cursor-not-allowed' : ''}
+              `}
+            >
+              {submitting ? (
+                <Loader2 className="w-12 h-12 animate-spin" />
+              ) : (
+                <>
+                  <span className="text-4xl font-black tracking-tighter">TAP {type}</span>
+                  <span className="text-[10px] uppercase font-bold tracking-widest opacity-80">Finish Clock Session</span>
+                </>
+              )}
+            </button>
 
-          <div className="grid grid-cols-2 gap-4 w-full mb-2">
-            <div className="p-4 rounded-[1.5rem] bg-muted/40 text-left">
-              <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1 tracking-wider">Zone</p>
-              <div className="flex items-center gap-2 font-bold text-sm">
-                {isWithinRadius ? (
-                  <><CheckCircle2 className="w-4 h-4 text-green-500" /> <span className="truncate">{workLocation?.name || 'Valid'}</span></>
-                ) : (
-                  <><XCircle className="w-4 h-4 text-red-500" /> <span className="text-red-500">Offsite</span></>
-                )}
+            <div className="grid grid-cols-2 gap-4 w-full mb-2">
+              <div className="p-4 rounded-[1.5rem] bg-muted/40 text-left">
+                <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1 tracking-wider">Zone</p>
+                <div className="flex items-center gap-2 font-bold text-sm">
+                  {isWithinRadius ? (
+                    <><CheckCircle2 className="w-4 h-4 text-green-500" /> <span className="truncate">{workLocation?.name || 'Valid'}</span></>
+                  ) : (
+                    <><XCircle className="w-4 h-4 text-red-500" /> <span className="text-red-500">Offsite</span></>
+                  )}
+                </div>
+              </div>
+              <div className="p-4 rounded-[1.5rem] bg-muted/40 text-left">
+                <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1 tracking-wider">GPS Signal</p>
+                <div className="flex items-center gap-2 font-bold text-sm">
+                  {location ? `${location.accuracy.toFixed(0)}m` : '--'}
+                  {location && location.accuracy > 80 && <AlertTriangle className="w-4 h-4 text-orange-500" />}
+                </div>
               </div>
             </div>
-            <div className="p-4 rounded-[1.5rem] bg-muted/40 text-left">
-              <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1 tracking-wider">GPS Signal</p>
-              <div className="flex items-center gap-2 font-bold text-sm">
-                {location ? `${location.accuracy.toFixed(0)}m` : '--'}
-                {location && location.accuracy > 80 && <AlertTriangle className="w-4 h-4 text-orange-500" />}
-              </div>
-            </div>
-          </div>
-        </CardContent>
-      </Card>
+          </CardContent>
+        </Card>
+      )}
 
-      {(anomalyExplanation || explaining) && (
+      {(anomalyExplanation || explaining) && !geofenceError && (
         <div className="p-5 rounded-[1.8rem] bg-orange-50/80 border border-orange-100 flex items-start gap-3 mb-6 animate-in fade-in slide-in-from-top-2 duration-500">
           {explaining ? (
             <Loader2 className="w-5 h-5 text-orange-600 shrink-0 mt-0.5 animate-spin" />
