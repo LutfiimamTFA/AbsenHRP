@@ -42,6 +42,23 @@
         "deviceId": { "type": "string" },
         "flags": { "type": "array", "items": { "type": "string" } }
       }
+    },
+    "WorkLocation": {
+      "title": "Work Location",
+      "description": "Geofenced work areas for onsite attendance.",
+      "type": "object",
+      "properties": {
+        "name": { "type": "string" },
+        "center": {
+          "type": "object",
+          "properties": {
+            "lat": { "type": "number" },
+            "lng": { "type": "number" }
+          }
+        },
+        "radiusM": { "type": "number" }
+      },
+      "required": ["name", "center", "radiusM"]
     }
   },
   "auth": {
@@ -67,6 +84,10 @@
     "/attendance_events/{eventId}": {
       "schema": { "$ref": "#/entities/AttendanceEvent" },
       "description": "Clock events."
+    },
+    "/work_locations/{locId}": {
+      "schema": { "$ref": "#/entities/WorkLocation" },
+      "description": "Configured work zones."
     }
   }
 }

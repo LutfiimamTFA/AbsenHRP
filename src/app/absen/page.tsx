@@ -1,3 +1,4 @@
+
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
@@ -9,13 +10,14 @@ import { useAuth, useFirestore, useUser, useCollection } from '@/firebase';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, LayoutDashboard } from 'lucide-react';
+import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, LayoutDashboard, Info } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
 import { CameraCapture } from '@/components/camera-capture';
 import { errorEmitter } from '@/firebase/error-emitter';
 import { FirestorePermissionError } from '@/firebase/errors';
+import { explainAttendanceAnomaly, type AttendanceAnomalyOutput } from '@/ai/flows/explain-attendance-anomaly';
 
 export default function AbsenPage() {
   const { user, loading: userLoading } = useUser();
@@ -30,6 +32,9 @@ export default function AbsenPage() {
   const [workLocation, setWorkLocation] = useState<any>(null);
   const [showCamera, setShowCamera] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [anomalyExplanation, setAnomalyExplanation] = useState<string | null>(null);
+  const [explaining, setExplaining] = useState(false);
+  
   const deviceId = useDeviceId();
 
   useEffect(() => {
@@ -68,7 +73,6 @@ export default function AbsenPage() {
         });
       },
       (err) => {
-        // Location errors are handled locally
         toast({
           variant: 'destructive',
           title: 'Location Error',
@@ -116,6 +120,36 @@ export default function AbsenPage() {
     checkGeofence();
   }, [location, db]);
 
+  // AI Anomaly Explanation Logic
+  useEffect(() => {
+    const getExplanation = async () => {
+      if (!location || !user) return;
+      const isAnomaly = location.accuracy > 80 || isNearBoundary || !isWithinRadius;
+      
+      if (isAnomaly && !anomalyExplanation && !explaining) {
+        setExplaining(true);
+        try {
+          const result = await explainAttendanceAnomaly({
+            accuracyM: location.accuracy,
+            distanceToBoundaryM: workLocation ? Math.abs(getDistance(location.lat, location.lng, workLocation.center.lat, workLocation.center.lng) - workLocation.radiusM) : null,
+            isNewDevice: false, // For now, simulate false
+            mode: isWithinRadius ? 'ONSITE' : 'OFFSITE',
+            workLocationName: workLocation?.name,
+            userName: user.displayName || 'User',
+          });
+          setAnomalyExplanation(result.explanation);
+        } catch (error) {
+          console.error('AI Explanation failed', error);
+        } finally {
+          setExplaining(false);
+        }
+      } else if (!isAnomaly) {
+        setAnomalyExplanation(null);
+      }
+    };
+    getExplanation();
+  }, [location, isWithinRadius, isNearBoundary, workLocation, user]);
+
   const handleTap = async (selfieBase64?: string) => {
     if (!location || !deviceId) return;
     setSubmitting(true);
@@ -150,6 +184,7 @@ export default function AbsenPage() {
         description: `Successfully clocked ${type}.`,
       });
       setShowCamera(false);
+      setAnomalyExplanation(null);
     } catch (error: any) {
       toast({
         variant: 'destructive',
@@ -190,25 +225,25 @@ export default function AbsenPage() {
         </div>
         <div className="flex gap-2">
           {user.isPrivileged && (
-            <Button variant="ghost" size="icon" onClick={() => router.push('/absen/admin')} className="text-muted-foreground">
+            <Button variant="ghost" size="icon" onClick={() => router.push('/absen/admin')} className="text-muted-foreground rounded-full">
               <LayoutDashboard className="w-5 h-5" />
             </Button>
           )}
-          <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="text-muted-foreground">
+          <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="text-muted-foreground rounded-full">
             <LogOut className="w-5 h-5" />
           </Button>
         </div>
       </div>
 
-      <Card className="border-none shadow-xl shadow-primary/5 rounded-3xl mb-6 bg-white overflow-hidden">
-        <CardContent className="pt-6 flex flex-col items-center text-center">
-          <div className="mb-4">
+      <Card className="border-none shadow-xl shadow-primary/5 rounded-[2.5rem] mb-6 bg-white overflow-hidden">
+        <CardContent className="pt-8 flex flex-col items-center text-center">
+          <div className="mb-6">
             {location ? (
-              <Badge variant={isWithinRadius ? 'default' : 'secondary'} className="px-4 py-1 rounded-full text-xs font-semibold gap-1">
-                <MapPin className="w-3 h-3" /> {mode}
+              <Badge variant={isWithinRadius ? 'default' : 'secondary'} className="px-5 py-1.5 rounded-full text-xs font-semibold gap-2">
+                <MapPin className="w-3.5 h-3.5" /> {mode}
               </Badge>
             ) : (
-              <Badge variant="outline" className="animate-pulse">Locating...</Badge>
+              <Badge variant="outline" className="animate-pulse rounded-full px-5 py-1.5">Locating...</Badge>
             )}
           </div>
 
@@ -216,36 +251,36 @@ export default function AbsenPage() {
             onClick={() => handleTap()}
             disabled={!location || submitting}
             className={`
-              relative w-48 h-48 rounded-full flex flex-col items-center justify-center gap-2 shadow-2xl transition-all tap-button-active mb-6
+              relative w-52 h-52 rounded-full flex flex-col items-center justify-center gap-2 shadow-2xl transition-all tap-button-active mb-8
               ${type === 'IN' ? 'bg-primary text-white shadow-primary/30' : 'bg-secondary text-white shadow-secondary/30'}
               ${(!location || submitting) ? 'opacity-50 grayscale cursor-not-allowed' : ''}
             `}
           >
             {submitting ? (
-              <Loader2 className="w-10 h-10 animate-spin" />
+              <Loader2 className="w-12 h-12 animate-spin" />
             ) : (
               <>
                 <span className="text-4xl font-black tracking-tighter">TAP {type}</span>
-                <span className="text-[10px] uppercase font-bold tracking-widest opacity-80">Click to finish</span>
+                <span className="text-[10px] uppercase font-bold tracking-widest opacity-80">Finish Clock Session</span>
               </>
             )}
           </button>
 
-          <div className="grid grid-cols-2 gap-4 w-full">
-            <div className="p-4 rounded-2xl bg-muted/50 text-left">
-              <p className="text-[10px] text-muted-foreground font-bold uppercase mb-1">Location</p>
-              <div className="flex items-center gap-2 font-semibold text-sm">
+          <div className="grid grid-cols-2 gap-4 w-full mb-2">
+            <div className="p-4 rounded-[1.5rem] bg-muted/40 text-left">
+              <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1 tracking-wider">Zone</p>
+              <div className="flex items-center gap-2 font-bold text-sm">
                 {isWithinRadius ? (
                   <><CheckCircle2 className="w-4 h-4 text-green-500" /> <span className="truncate">{workLocation?.name || 'Valid'}</span></>
                 ) : (
-                  <><XCircle className="w-4 h-4 text-red-500" /> <span>Outside Area</span></>
+                  <><XCircle className="w-4 h-4 text-red-500" /> <span className="text-red-500">Offsite</span></>
                 )}
               </div>
             </div>
-            <div className="p-4 rounded-2xl bg-muted/50 text-left">
-              <p className="text-[10px] text-muted-foreground font-bold uppercase mb-1">Accuracy</p>
-              <div className="flex items-center gap-2 font-semibold text-sm">
-                {location?.accuracy.toFixed(1)}m
+            <div className="p-4 rounded-[1.5rem] bg-muted/40 text-left">
+              <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1 tracking-wider">GPS Signal</p>
+              <div className="flex items-center gap-2 font-bold text-sm">
+                {location ? `${location.accuracy.toFixed(0)}m` : '--'}
                 {location && location.accuracy > 80 && <AlertTriangle className="w-4 h-4 text-orange-500" />}
               </div>
             </div>
@@ -253,26 +288,30 @@ export default function AbsenPage() {
         </CardContent>
       </Card>
 
-      {isAnomaly && (
-        <div className="p-4 rounded-2xl bg-orange-50 border border-orange-100 flex items-start gap-3 mb-6">
-          <AlertTriangle className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
-          <div className="text-xs text-orange-800">
-            <p className="font-bold mb-0.5">Anomaly Detected</p>
-            <p>Verification selfie required for security.</p>
+      {(anomalyExplanation || explaining) && (
+        <div className="p-5 rounded-[1.8rem] bg-orange-50/80 border border-orange-100 flex items-start gap-3 mb-6 animate-in fade-in slide-in-from-top-2 duration-500">
+          {explaining ? (
+            <Loader2 className="w-5 h-5 text-orange-600 shrink-0 mt-0.5 animate-spin" />
+          ) : (
+            <Info className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
+          )}
+          <div className="text-xs text-orange-900 leading-relaxed">
+            <p className="font-black uppercase tracking-widest text-[10px] mb-1">Notice</p>
+            {explaining ? <p>Generating context-aware guidance...</p> : <p>{anomalyExplanation}</p>}
           </div>
         </div>
       )}
 
-      <div className="mt-auto">
-        <p className="text-[10px] font-bold text-muted-foreground uppercase text-center mb-3">Today&apos;s Activity</p>
+      <div className="mt-auto pb-4">
+        <p className="text-[9px] font-black text-muted-foreground uppercase text-center mb-4 tracking-[0.2em]">Daily Timeline</p>
         <div className="flex justify-center items-center gap-4 text-sm font-medium">
           {lastEvent ? (
-            <div className="flex items-center gap-2 px-4 py-2 bg-white rounded-full shadow-sm border">
-              <Badge variant={lastEvent.type === 'IN' ? 'default' : 'secondary'} className="rounded-full">{lastEvent.type}</Badge>
-              <span className="text-muted-foreground">at {lastEvent.tsServer?.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
+            <div className="flex items-center gap-3 px-5 py-2.5 bg-white rounded-full shadow-sm border border-muted-foreground/10">
+              <Badge variant={lastEvent.type === 'IN' ? 'default' : 'secondary'} className="rounded-full px-2">{lastEvent.type}</Badge>
+              <span className="text-muted-foreground text-xs font-bold">Logged at {lastEvent.tsServer?.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             </div>
           ) : (
-            <span className="text-muted-foreground italic text-xs">No activity yet today</span>
+            <span className="text-muted-foreground italic text-[10px] font-bold uppercase tracking-widest opacity-60">First activity of the day</span>
           )}
         </div>
       </div>
