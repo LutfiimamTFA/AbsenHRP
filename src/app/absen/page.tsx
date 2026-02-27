@@ -42,16 +42,16 @@ export default function AbsenPage() {
   
   const deviceId = useDeviceId();
 
-  // Log project ID once on init
+  // Log project ID once on init as requested
   useEffect(() => {
     try {
-      console.log('firebase projectId', getApp().options.projectId);
+      console.log('projectId', getApp().options.projectId);
     } catch (e) {
       console.error('Failed to get project ID', e);
     }
   }, []);
 
-  // Guard: Resolve Auth and Internal Role states
+  // Guard: Resolve Auth and Internal Role states before any Firestore LIST ops
   useEffect(() => {
     if (!userLoading) {
       setAuthReady(true);
@@ -70,7 +70,7 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // Attendance query: ONLY if guards are passed
+  // Attendance query: ONLY if guards are passed. STICKY FILTER: where('uid', '==', user.uid)
   const lastEventQuery = useMemo(() => {
     if (!authReady || !internalReady || !isInternalUser || !user) return null;
     return query(
@@ -113,9 +113,9 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [authReady, internalReady, isInternalUser, toast]);
 
+  // Geofence check: ONLY if guards passed. Collection name: 'work_locations'
   useEffect(() => {
     const checkGeofence = async () => {
-      // Guard: Ensure guards passed and location exists before list work_locations
       if (!authReady || !internalReady || !isInternalUser || !location || geofenceChecked) return;
       
       try {
