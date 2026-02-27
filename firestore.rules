@@ -6,27 +6,36 @@ service cloud.firestore {
       return request.auth != null;
     }
 
+    function isAdmin() {
+      return exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
+    }
+
+    function isHRD() {
+      return exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid));
+    }
+
     // User Profile
     match /users/{uid} {
-      allow read: if isSignedIn() && (request.auth.uid == uid || 
-        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) || 
-        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)));
+      allow read: if isSignedIn() && (request.auth.uid == uid || isAdmin() || isHRD());
       allow write: if isSignedIn() && request.auth.uid == uid;
     }
+
+    // Koleksi penanda peran: Hanya untuk pengecekan internal rules (exists)
+    match /roles_admin/{uid} { allow read, write: if false; }
+    match /roles_hrd/{uid} { allow read, write: if false; }
+    match /roles_manager/{uid} { allow read, write: if false; }
 
     // Lokasi Kantor: Dibaca oleh semua user internal untuk geofencing
     match /work_locations/{locationId} {
       allow read: if isSignedIn();
-      allow write: if isSignedIn() && (
-        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) || 
-        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)));
+      allow write: if isSignedIn() && (isAdmin() || isHRD());
     }
 
     // Kejadian Absensi: HANYA boleh baca milik sendiri (kecuali Admin/HRD)
     match /attendance_events/{eventId} {
       allow read: if isSignedIn() && (
-        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) || 
-        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
+        isAdmin() || 
+        isHRD() ||
         (resource != null && resource.data.uid == request.auth.uid)
       );
       // Penulisan hanya melalui Cloud Function yang aman
