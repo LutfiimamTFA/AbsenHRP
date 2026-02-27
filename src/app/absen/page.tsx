@@ -1,3 +1,4 @@
+
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
@@ -9,14 +10,14 @@ import { useAuth, useFirestore, useUser, useCollection } from '@/firebase';
 import { Button } from '@/components/ui/button';
 import { Card, CardHeader, CardTitle, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
-import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2 } from 'lucide-react';
+import { MapPin, User as UserIcon, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, LayoutDashboard } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
 import { CameraCapture } from '@/components/camera-capture';
 
 export default function AbsenPage() {
-  const { user, loading: authLoading } = useUser();
+  const { user, loading: userLoading } = useUser();
   const auth = useAuth();
   const db = useFirestore();
   const router = useRouter();
@@ -30,18 +31,14 @@ export default function AbsenPage() {
   const [submitting, setSubmitting] = useState(false);
   const deviceId = useDeviceId();
 
-  // Redirect if not logged in
   useEffect(() => {
-    if (!authLoading && !user) {
+    if (!userLoading && !user) {
       router.push('/login');
     }
-  }, [user, authLoading, router]);
+  }, [user, userLoading, router]);
 
-  // Fetch last event for today
   const lastEventQuery = useMemo(() => {
     if (!user) return null;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
@@ -59,7 +56,6 @@ export default function AbsenPage() {
     return eventDate >= today ? events[0] : null;
   }, [events]);
 
-  // Location tracking
   useEffect(() => {
     if (!user) return;
     const watchId = navigator.geolocation.watchPosition(
@@ -70,9 +66,7 @@ export default function AbsenPage() {
           accuracy: pos.coords.accuracy,
         });
       },
-      (err) => {
-        // We avoid console.error here to prevent confusing error overlays. 
-        // User notification is handled via the toast.
+      () => {
         toast({
           variant: 'destructive',
           title: 'Location Error',
@@ -84,7 +78,6 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, [user, toast]);
 
-  // Geofencing logic
   useEffect(() => {
     const checkGeofence = async () => {
       if (!location) return;
@@ -155,7 +148,7 @@ export default function AbsenPage() {
     }
   };
 
-  if (authLoading || !user) {
+  if (userLoading || !user) {
     return (
       <div className="min-h-svh flex items-center justify-center bg-background">
         <Loader2 className="w-8 h-8 animate-spin text-primary" />
@@ -171,20 +164,30 @@ export default function AbsenPage() {
     <div className="min-h-svh bg-background flex flex-col p-6 max-w-md mx-auto">
       <div className="flex justify-between items-center mb-8">
         <div className="flex items-center gap-3">
-          <div className="w-10 h-10 bg-primary/10 rounded-full flex items-center justify-center text-primary">
+          <div className="w-10 h-10 bg-primary/10 rounded-full flex items-center justify-center text-primary relative">
             <UserIcon className="w-5 h-5" />
+            {user.isPrivileged && (
+               <Badge className="absolute -top-2 -right-2 px-1 text-[8px] h-4 bg-orange-500 hover:bg-orange-600">ADMIN</Badge>
+            )}
           </div>
           <div>
             <h1 className="font-bold text-lg leading-tight">{user.displayName || 'PresenGO User'}</h1>
-            <p className="text-xs text-muted-foreground">{user.email}</p>
+            <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">{user.role}</p>
           </div>
         </div>
-        <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="text-muted-foreground">
-          <LogOut className="w-5 h-5" />
-        </Button>
+        <div className="flex gap-2">
+          {user.isPrivileged && (
+            <Button variant="ghost" size="icon" onClick={() => router.push('/absen/admin')} className="text-muted-foreground">
+              <LayoutDashboard className="w-5 h-5" />
+            </Button>
+          )}
+          <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="text-muted-foreground">
+            <LogOut className="w-5 h-5" />
+          </Button>
+        </div>
       </div>
 
-      <Card className="border-none shadow-xl shadow-primary/5 rounded-3xl mb-6 bg-white">
+      <Card className="border-none shadow-xl shadow-primary/5 rounded-3xl mb-6 bg-white overflow-hidden">
         <CardContent className="pt-6 flex flex-col items-center text-center">
           <div className="mb-4">
             {location ? (
@@ -242,21 +245,21 @@ export default function AbsenPage() {
           <AlertTriangle className="w-5 h-5 text-orange-600 shrink-0 mt-0.5" />
           <div className="text-xs text-orange-800">
             <p className="font-bold mb-0.5">Anomaly Detected</p>
-            <p>Verification selfie will be required for this tap.</p>
+            <p>Verification selfie required for security.</p>
           </div>
         </div>
       )}
 
       <div className="mt-auto">
-        <p className="text-[10px] font-bold text-muted-foreground uppercase text-center mb-3">Today&apos;s Last Activity</p>
+        <p className="text-[10px] font-bold text-muted-foreground uppercase text-center mb-3">Today&apos;s Activity</p>
         <div className="flex justify-center items-center gap-4 text-sm font-medium">
           {lastEvent ? (
-            <div className="flex items-center gap-2 px-4 py-2 bg-white rounded-full shadow-sm">
+            <div className="flex items-center gap-2 px-4 py-2 bg-white rounded-full shadow-sm border">
               <Badge variant={lastEvent.type === 'IN' ? 'default' : 'secondary'} className="rounded-full">{lastEvent.type}</Badge>
               <span className="text-muted-foreground">at {lastEvent.tsServer?.toDate().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</span>
             </div>
           ) : (
-            <span className="text-muted-foreground italic">No activity yet today</span>
+            <span className="text-muted-foreground italic text-xs">No activity yet today</span>
           )}
         </div>
       </div>

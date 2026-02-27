@@ -1,0 +1,72 @@
+
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "Base user profile information.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "email": { "type": "string" },
+        "displayName": { "type": "string" },
+        "role": { "type": "string", "enum": ["employee", "karyawan", "hrd", "manager", "superadmin"] },
+        "primaryDeviceId": { "type": "string" }
+      }
+    },
+    "RoleMarker": {
+      "title": "Role Marker",
+      "description": "Empty document used to flag roles for specific UIDs in fallback collections.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" }
+      }
+    },
+    "AttendanceEvent": {
+      "title": "Attendance Event",
+      "description": "Records of clock-in and clock-out events.",
+      "type": "object",
+      "properties": {
+        "uid": { "type": "string" },
+        "type": { "type": "string", "enum": ["IN", "OUT"] },
+        "mode": { "type": "string", "enum": ["ONSITE", "OFFSITE"] },
+        "tsServer": { "type": "string", "format": "date-time" },
+        "tsClient": { "type": "string", "format": "date-time" },
+        "location": {
+          "type": "object",
+          "properties": {
+            "lat": { "type": "number" },
+            "lng": { "type": "number" }
+          }
+        },
+        "accuracyM": { "type": "number" },
+        "deviceId": { "type": "string" },
+        "flags": { "type": "array", "items": { "type": "string" } }
+      }
+    }
+  },
+  "auth": {
+    "providers": ["password"]
+  },
+  "firestore": {
+    "/users/{uid}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "Primary user profiles and roles."
+    },
+    "/roles_admin/{uid}": {
+      "schema": { "$ref": "#/entities/RoleMarker" },
+      "description": "Marker collection for superadmin fallback."
+    },
+    "/roles_hrd/{uid}": {
+      "schema": { "$ref": "#/entities/RoleMarker" },
+      "description": "Marker collection for HRD fallback."
+    },
+    "/roles_manager/{uid}": {
+      "schema": { "$ref": "#/entities/RoleMarker" },
+      "description": "Marker collection for manager fallback."
+    },
+    "/attendance_events/{eventId}": {
+      "schema": { "$ref": "#/entities/AttendanceEvent" },
+      "description": "Clock events."
+    }
+  }
+}
