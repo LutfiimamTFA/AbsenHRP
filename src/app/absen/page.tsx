@@ -1,4 +1,3 @@
-
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
@@ -40,14 +39,6 @@ export default function AbsenPage() {
   
   const deviceId = useDeviceId();
 
-  // Debug logging for Dev
-  useEffect(() => {
-    if (process.env.NODE_ENV !== 'production' && !userLoading) {
-      console.log('[AbsenPage Dev] Current User UID:', user?.uid);
-      console.log('[AbsenPage Dev] Project ID:', auth.app.options.projectId);
-    }
-  }, [user, userLoading, auth]);
-
   useEffect(() => {
     if (!userLoading) {
       setAuthReady(true);
@@ -61,7 +52,6 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // Load Attendance Config from HRP Center
   useEffect(() => {
     const loadConfig = async () => {
       if (!authReady || !user || configLoaded) return;
@@ -69,10 +59,6 @@ export default function AbsenPage() {
         const configDocRef = doc(db, 'attendance_config', 'default');
         const snap = await getDoc(configDocRef);
         
-        if (process.env.NODE_ENV !== 'production') {
-          console.log('[AbsenPage Dev] Loading config from:', configDocRef.path);
-        }
-
         if (snap.exists()) {
           const data = snap.data();
           if (data.office && data.shift) {
@@ -85,11 +71,7 @@ export default function AbsenPage() {
         }
       } catch (err: any) {
         console.error('Load config error:', err);
-        if (err.code === 'permission-denied') {
-          setConfigError('Izin ditolak membaca konfigurasi. Hubungi Admin.');
-        } else {
-          setConfigError('Gagal memuat konfigurasi. Coba lagi.');
-        }
+        setConfigError(`Gagal memuat konfigurasi: ${err.message || 'Error tidak dikenal'}`);
       } finally {
         setConfigLoaded(true);
       }
@@ -113,9 +95,6 @@ export default function AbsenPage() {
           const speed = dist / (timeSec || 1); 
           if (speed > 500 && timeSec > 5) {
             currentFlags.push('location_jump');
-          }
-          if (dist === 0 && timeSec > 30) {
-            currentFlags.push('static_location');
           }
         }
         
@@ -144,7 +123,8 @@ export default function AbsenPage() {
   useEffect(() => {
     if (location && config?.office) {
       const dist = getDistance(location.lat, location.lng, config.office.lat, config.office.lng);
-      if (location.accuracy > 100) {
+      // Jika akurasi sangat buruk (>150m), anggap unknown
+      if (location.accuracy > 150) {
         setZone('unknown');
       } else if (dist <= config.office.radiusM) {
         setZone('onsite');
@@ -186,27 +166,25 @@ export default function AbsenPage() {
         if (!ctx) return resolve(base64);
 
         ctx.drawImage(img, 0, 0);
-        ctx.fillStyle = 'rgba(0,0,0,0.5)';
-        ctx.fillRect(0, canvas.height - 180, canvas.width, 180);
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(0, canvas.height - 200, canvas.width, 200);
 
         ctx.fillStyle = 'white';
         const now = new Date();
         const timeStr = format(now, 'HH:mm:ss');
         const dateStr = format(now, 'dd MMM yyyy', { locale: localeId });
         
+        ctx.font = 'bold 36px Inter, sans-serif';
+        ctx.fillText(`${user?.displayName || 'Karyawan'}`, 40, canvas.height - 140);
+        
+        ctx.font = '26px Inter, sans-serif';
+        ctx.fillText(`${user?.brandName || ''} • ${user?.division || ''}`, 40, canvas.height - 100);
+        ctx.fillText(`${dateStr} - ${timeStr} WIB`, 40, canvas.height - 65);
+        ctx.fillText(`GPS: ${location?.lat.toFixed(6)}, ${location?.lng.toFixed(6)} (±${location?.accuracy.toFixed(0)}m)`, 40, canvas.height - 30);
+        
         ctx.font = 'bold 32px Inter, sans-serif';
-        ctx.fillText(`${user?.displayName || 'User'}`, 30, canvas.height - 130);
-        
-        ctx.font = '24px Inter, sans-serif';
-        ctx.fillText(`${user?.brandName || ''} • ${user?.division || ''}`, 30, canvas.height - 95);
-        ctx.fillText(`${dateStr} - ${timeStr} WIB`, 30, canvas.height - 65);
-        
-        ctx.font = 'italic 20px Inter, sans-serif';
-        ctx.fillText(`Lokasi: ${location?.lat.toFixed(6)}, ${location?.lng.toFixed(6)} (Akurasi: ${location?.accuracy.toFixed(0)}m)`, 30, canvas.height - 35);
-        
-        ctx.font = 'bold 28px Inter, sans-serif';
         ctx.textAlign = 'right';
-        ctx.fillText(statusText.toUpperCase(), canvas.width - 30, canvas.height - 35);
+        ctx.fillText(statusText.toUpperCase(), canvas.width - 40, canvas.height - 30);
         
         resolve(canvas.toDataURL('image/jpeg', 0.8));
       };
@@ -216,7 +194,8 @@ export default function AbsenPage() {
   const handleTap = async (photoBase64?: string) => {
     if (!user || !location || submitting || !config) return;
 
-    const requiresPhoto = zone === 'offsite' || location.accuracy > 100 || isAnomaly;
+    // Foto wajib jika di luar radius kantor atau GPS kurang akurat (>80m)
+    const requiresPhoto = zone === 'offsite' || location.accuracy > 80 || isAnomaly;
     if (requiresPhoto && !photoBase64) {
       setShowCamera(true);
       return;
@@ -234,6 +213,7 @@ export default function AbsenPage() {
         const storage = getStorage();
         const path = `attendance/${user.uid}/${Date.now()}.jpg`;
         const storageRef = ref(storage, path);
+        // Upload foto ber-watermark
         await uploadString(storageRef, watermarked, 'data_url');
         photoUrl = await getDownloadURL(storageRef);
       }
@@ -244,7 +224,7 @@ export default function AbsenPage() {
 
       await addDoc(collection(db, 'attendance_events'), {
         uid: user.uid,
-        displayName: user.displayName,
+        displayName: user.displayName || 'Karyawan',
         brandId: user.brandId || '',
         division: user.division || '',
         type,
@@ -265,11 +245,11 @@ export default function AbsenPage() {
       });
       setShowCamera(false);
     } catch (err: any) {
-      console.error('Tap error:', err);
+      console.error('Tap error detail:', err);
       toast({
         variant: 'destructive',
         title: 'Gagal Absen',
-        description: 'Terjadi kesalahan sistem. Coba lagi atau hubungi HRD.',
+        description: `Error: ${err.message || 'Masalah koneksi atau izin server.'}`,
       });
     } finally {
       setSubmitting(false);
@@ -300,7 +280,7 @@ export default function AbsenPage() {
             <div>
               <h1 className="font-bold text-lg leading-tight">{user?.displayName}</h1>
               <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
-                {user?.brandName} • {user?.division} • {user?.roleLabel}
+                {user?.brandName} • {user?.division}
               </p>
             </div>
           </div>
@@ -334,7 +314,7 @@ export default function AbsenPage() {
                     <>
                       {zone === 'unknown' ? (
                         <Badge variant="outline" className="px-5 py-2 rounded-full text-orange-500 border-orange-200 gap-2">
-                          <AlertTriangle className="w-4 h-4" /> GPS LEMAH
+                          <AlertTriangle className="w-4 h-4" /> SINYAL LEMAH
                         </Badge>
                       ) : (
                         <Badge variant={zone === 'onsite' ? 'default' : 'secondary'} className="px-5 py-2 rounded-full gap-2">
@@ -377,13 +357,13 @@ export default function AbsenPage() {
                   <div className="p-4 bg-muted/40 rounded-3xl border border-white text-left">
                     <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Status</p>
                     <p className="font-bold text-sm truncate">
-                      {zone === 'onsite' ? 'Dalam Kantor' : zone === 'offsite' ? 'Luar Jangkauan' : 'GPS Lemah'}
+                      {zone === 'onsite' ? 'Dalam Kantor' : zone === 'offsite' ? 'Luar Kantor' : 'GPS Lemah'}
                     </p>
                   </div>
                   <div className="p-4 bg-muted/40 rounded-3xl border border-white text-left relative overflow-hidden group">
-                    <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Akurasi</p>
+                    <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Akurasi GPS</p>
                     <p className="font-bold text-sm flex items-center justify-between gap-2">
-                      {location ? `${location.accuracy.toFixed(0)}m` : '--'}
+                      {location ? `±${location.accuracy.toFixed(0)}m` : '--'}
                       <button onClick={refreshLocation} className="p-1 hover:bg-white/50 rounded-full transition-colors">
                         <RefreshCw className="w-3 h-3 text-primary" />
                       </button>
@@ -396,15 +376,15 @@ export default function AbsenPage() {
             <div className="bg-primary/5 p-4 rounded-2xl flex items-start gap-3 border border-primary/10">
               <Info className="w-5 h-5 text-primary shrink-0" />
               <p className="text-[11px] text-muted-foreground leading-relaxed">
-                Web ini khusus absensi & riwayat pribadi. Monitoring dilakukan di portal HRP. 
-                <span className="font-bold text-primary ml-1 underline">Wajib foto jika di luar kantor atau GPS tidak akurat.</span>
+                Radius Area Kantor diset oleh HRD ({config?.office?.radiusM || 150}m). 
+                <span className="font-bold text-primary ml-1 underline">Wajib foto jika di luar area atau sinyal GPS tidak akurat.</span>
               </p>
             </div>
 
             <div className="space-y-4 pb-10">
               <div className="flex items-center gap-2">
                 <History className="w-4 h-4 text-muted-foreground" />
-                <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Riwayat Pribadi</h2>
+                <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Riwayat Hari Ini</h2>
               </div>
               
               <div className="space-y-3">
@@ -412,7 +392,7 @@ export default function AbsenPage() {
                   <div className="text-center p-8"><Loader2 className="w-6 h-6 animate-spin mx-auto text-muted-foreground" /></div>
                 ) : historyError ? (
                   <div className="text-center p-8 bg-red-50 rounded-2xl border border-red-100">
-                    <p className="text-xs text-red-600 font-medium">Riwayat tidak dapat dimuat. Pastikan Anda login dan aturan Firestore sudah benar.</p>
+                    <p className="text-xs text-red-600 font-medium">Riwayat tidak dapat dimuat. Periksa izin Firestore Anda.</p>
                   </div>
                 ) : events?.map((ev: any, i: number) => (
                   <div key={i} className="bg-white p-4 rounded-2xl border border-white shadow-sm flex justify-between items-center transition-all hover:shadow-md">
@@ -442,7 +422,7 @@ export default function AbsenPage() {
                 ))}
                 {(!events || events.length === 0) && !eventsLoading && (
                   <div className="text-center p-8 border-2 border-dashed rounded-3xl opacity-50">
-                    <p className="text-sm italic">Belum ada riwayat hari ini.</p>
+                    <p className="text-sm italic">Belum ada riwayat tercatat.</p>
                   </div>
                 )}
               </div>
