@@ -1,3 +1,4 @@
+
 'use client';
 
 /**
@@ -26,6 +27,11 @@ export function initializeFirebase(): {
   const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
   const firestore = getFirestore(firebaseApp);
   const auth = getAuth(firebaseApp);
+
+  // Debug logging for development environment only
+  if (process.env.NODE_ENV !== 'production') {
+    console.log(`[Firebase Dev] Initialized with Project ID: ${firebaseConfig.projectId}`);
+  }
 
   return { firebaseApp, firestore, auth };
 }
