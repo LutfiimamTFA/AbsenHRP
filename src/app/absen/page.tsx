@@ -123,7 +123,6 @@ export default function AbsenPage() {
   useEffect(() => {
     if (location && config?.office) {
       const dist = getDistance(location.lat, location.lng, config.office.lat, config.office.lng);
-      // Jika akurasi sangat buruk (>150m), anggap unknown
       if (location.accuracy > 150) {
         setZone('unknown');
       } else if (dist <= config.office.radiusM) {
@@ -136,6 +135,8 @@ export default function AbsenPage() {
 
   const historyQuery = useMemo(() => {
     if (!user?.uid) return null;
+    // PENTING: Filter UID wajib ada agar sesuai dengan Security Rules
+    // Dan OrderBy tsClient membutuhkan Index di Firebase Console
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
@@ -146,12 +147,26 @@ export default function AbsenPage() {
 
   const { data: events, error: historyError, loading: eventsLoading } = useCollection(historyQuery);
 
+  // Debugging untuk riwayat
+  useEffect(() => {
+    if (historyError) {
+      console.error('History Query Error:', historyError);
+    }
+    if (events) {
+      console.log('History Loaded:', events.length, 'records');
+    }
+  }, [events, historyError]);
+
   const lastEvent = useMemo(() => {
     if (!events || events.length === 0) return null;
     const today = new Date();
     today.setHours(0, 0, 0, 0);
-    const eventDate = (events[0] as any).tsClient?.toDate() || new Date();
-    return eventDate >= today ? (events[0] as any) : null;
+    const eventData = events[0] as any;
+    const eventDate = eventData.tsClient instanceof Timestamp 
+      ? eventData.tsClient.toDate() 
+      : (eventData.tsClient ? new Date(eventData.tsClient) : new Date());
+    
+    return eventDate >= today ? eventData : null;
   }, [events]);
 
   const applyWatermark = async (base64: string, statusText: string): Promise<string> => {
@@ -194,7 +209,6 @@ export default function AbsenPage() {
   const handleTap = async (photoBase64?: string) => {
     if (!user || !location || submitting || !config) return;
 
-    // Foto wajib jika di luar radius kantor atau GPS kurang akurat (>80m)
     const requiresPhoto = zone === 'offsite' || location.accuracy > 80 || isAnomaly;
     if (requiresPhoto && !photoBase64) {
       setShowCamera(true);
@@ -213,7 +227,6 @@ export default function AbsenPage() {
         const storage = getStorage();
         const path = `attendance/${user.uid}/${Date.now()}.jpg`;
         const storageRef = ref(storage, path);
-        // Upload foto ber-watermark
         await uploadString(storageRef, watermarked, 'data_url');
         photoUrl = await getDownloadURL(storageRef);
       }
@@ -222,6 +235,7 @@ export default function AbsenPage() {
       if (zone === 'offsite') flags.push('OFFSITE');
       if (location.accuracy > 80) flags.push('LOW_ACCURACY');
 
+      // Simpan Event dengan Field Lengkap
       await addDoc(collection(db, 'attendance_events'), {
         uid: user.uid,
         displayName: user.displayName || 'Karyawan',
@@ -233,10 +247,10 @@ export default function AbsenPage() {
         location: { lat: location.lat, lng: location.lng },
         accuracyM: location.accuracy,
         isOnsite: zone === 'onsite',
-        deviceId,
+        deviceId: deviceId || 'unknown',
         mode: zone.toUpperCase(),
-        photoUrl,
-        flags
+        photoUrl: photoUrl || null,
+        flags: flags
       });
 
       toast({
@@ -244,6 +258,7 @@ export default function AbsenPage() {
         description: `Absen ${type === 'tap_in' ? 'Masuk' : 'Keluar'} berhasil dicatat.`,
       });
       setShowCamera(false);
+      refreshLocation(); // Update status UI
     } catch (err: any) {
       console.error('Tap error detail:', err);
       toast({
@@ -252,8 +267,7 @@ export default function AbsenPage() {
         description: `Error: ${err.message || 'Masalah koneksi atau izin server.'}`,
       });
     } finally {
-      setSubmitting(false);
-    }
+      }
   };
 
   if (userLoading || !authReady) {
@@ -265,7 +279,7 @@ export default function AbsenPage() {
   }
 
   const type = lastEvent?.type === 'tap_in' ? 'tap_out' : 'tap_in';
-  const isFinished = lastEvent?.type === 'tap_out' && format(lastEvent.tsClient.toDate(), 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
+  const isFinished = lastEvent?.type === 'tap_out' && format(lastEvent.tsClient instanceof Timestamp ? lastEvent.tsClient.toDate() : new Date(), 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
 
   return (
     <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto relative overflow-hidden">
@@ -375,53 +389,67 @@ export default function AbsenPage() {
 
             <div className="bg-primary/5 p-4 rounded-2xl flex items-start gap-3 border border-primary/10">
               <Info className="w-5 h-5 text-primary shrink-0" />
-              <p className="text-[11px] text-muted-foreground leading-relaxed">
-                Radius Area Kantor diset oleh HRD ({config?.office?.radiusM || 150}m). 
-                <span className="font-bold text-primary ml-1 underline">Wajib foto jika di luar area atau sinyal GPS tidak akurat.</span>
-              </p>
+              <div className="text-[11px] text-muted-foreground leading-relaxed">
+                <p>Radius Area Kantor: <span className="font-bold">{config?.office?.radiusM || 150}m</span>.</p>
+                <p className="font-bold text-primary underline">Wajib foto jika di luar area atau sinyal GPS lemah (&gt;80m).</p>
+              </div>
             </div>
 
             <div className="space-y-4 pb-10">
-              <div className="flex items-center gap-2">
-                <History className="w-4 h-4 text-muted-foreground" />
-                <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Riwayat Hari Ini</h2>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <History className="w-4 h-4 text-muted-foreground" />
+                  <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Riwayat</h2>
+                </div>
+                {events && events.length > 0 && (
+                   <span className="text-[10px] text-muted-foreground">{events.length} Terakhir</span>
+                )}
               </div>
               
               <div className="space-y-3">
                 {eventsLoading ? (
-                  <div className="text-center p-8"><Loader2 className="w-6 h-6 animate-spin mx-auto text-muted-foreground" /></div>
+                  <div className="text-center p-8">
+                    <Loader2 className="w-6 h-6 animate-spin mx-auto text-muted-foreground" />
+                    <p className="text-[10px] mt-2 text-muted-foreground">Memuat data...</p>
+                  </div>
                 ) : historyError ? (
                   <div className="text-center p-8 bg-red-50 rounded-2xl border border-red-100">
-                    <p className="text-xs text-red-600 font-medium">Riwayat tidak dapat dimuat. Periksa izin Firestore Anda.</p>
+                    <AlertTriangle className="w-6 h-6 text-red-500 mx-auto mb-2" />
+                    <p className="text-xs text-red-600 font-medium">Gagal memuat riwayat.</p>
+                    <p className="text-[9px] text-red-400 mt-1">Pastikan Index Firestore sudah dibuat di Firebase Console.</p>
                   </div>
-                ) : events?.map((ev: any, i: number) => (
-                  <div key={i} className="bg-white p-4 rounded-2xl border border-white shadow-sm flex justify-between items-center transition-all hover:shadow-md">
-                    <div className="flex items-center gap-4">
-                      <div className={`p-2 rounded-xl ${ev.type === 'tap_in' ? 'bg-primary/10 text-primary' : 'bg-secondary/10 text-secondary'}`}>
-                        <Clock className="w-5 h-5" />
+                ) : events?.map((ev: any, i: number) => {
+                  const eventDate = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : (ev.tsClient ? new Date(ev.tsClient) : new Date());
+                  return (
+                    <div key={i} className="bg-white p-4 rounded-2xl border border-white shadow-sm flex justify-between items-center transition-all hover:shadow-md">
+                      <div className="flex items-center gap-4">
+                        <div className={`p-2 rounded-xl ${ev.type === 'tap_in' ? 'bg-primary/10 text-primary' : 'bg-secondary/10 text-secondary'}`}>
+                          <Clock className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <p className="font-bold text-sm uppercase">TAP {ev.type === 'tap_in' ? 'MASUK' : 'KELUAR'}</p>
+                          <p className="text-[10px] text-muted-foreground">
+                            {format(eventDate, 'eeee, d MMM', { locale: localeId })}
+                          </p>
+                        </div>
                       </div>
-                      <div>
-                        <p className="font-bold text-sm uppercase">TAP {ev.type === 'tap_in' ? 'MASUK' : 'KELUAR'}</p>
-                        <p className="text-[10px] text-muted-foreground">
-                          {ev.tsClient ? format(ev.tsClient.toDate(), 'eeee, d MMM', { locale: localeId }) : 'Memproses...'}
+                      <div className="text-right flex flex-col items-end gap-1">
+                        <p className="font-black text-lg">
+                          {format(eventDate, 'HH:mm')}
                         </p>
+                        <div className="flex gap-1">
+                          <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.isOnsite ? 'bg-green-50 text-green-700' : 'bg-orange-50 text-orange-700'}`}>
+                            {ev.mode}
+                          </Badge>
+                          {ev.photoUrl && <Camera className="w-3 h-3 text-muted-foreground" />}
+                        </div>
                       </div>
                     </div>
-                    <div className="text-right flex flex-col items-end gap-1">
-                      <p className="font-black text-lg">
-                        {ev.tsClient ? format(ev.tsClient.toDate(), 'HH:mm') : '--:--'}
-                      </p>
-                      <div className="flex gap-1">
-                        <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.isOnsite ? 'bg-green-50 text-green-700' : 'bg-orange-50 text-orange-700'}`}>
-                          {ev.mode}
-                        </Badge>
-                        {ev.photoUrl && <Camera className="w-3 h-3 text-muted-foreground" />}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-                {(!events || events.length === 0) && !eventsLoading && (
+                  );
+                })}
+                {(!events || events.length === 0) && !eventsLoading && !historyError && (
                   <div className="text-center p-8 border-2 border-dashed rounded-3xl opacity-50">
+                    <History className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
                     <p className="text-sm italic">Belum ada riwayat tercatat.</p>
                   </div>
                 )}
