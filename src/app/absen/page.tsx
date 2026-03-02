@@ -156,10 +156,11 @@ export default function AbsenPage() {
   const lastEvent = useMemo(() => {
     if (!sortedEvents || sortedEvents.length === 0) return null;
     const todayStr = format(new Date(), 'yyyy-MM-dd');
-    const latest = sortedEvents[0] as any;
-    const latestDate = latest.tsClient instanceof Timestamp ? latest.tsClient.toDate() : new Date(latest.tsClient);
-    
-    return format(latestDate, 'yyyy-MM-dd') === todayStr ? latest : null;
+    const todayEvents = sortedEvents.filter((ev: any) => {
+      const date = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
+      return format(date, 'yyyy-MM-dd') === todayStr;
+    });
+    return todayEvents.length > 0 ? todayEvents[0] : null;
   }, [sortedEvents]);
 
   const checkShiftFlags = (type: 'tap_in' | 'tap_out', time: Date) => {
@@ -174,12 +175,12 @@ export default function AbsenPage() {
       const currentTotal = time.getHours() * 60 + time.getMinutes();
       
       if (type === 'tap_in') {
-        const startTotal = startH * 60 + startM;
-        if (currentTotal > startTotal + grace) {
+        const startTotal = (startH * 60) + startM;
+        if (currentTotal > (startTotal + grace)) {
           flags.push('TERLAMBAT');
         }
       } else if (type === 'tap_out') {
-        const endTotal = endH * 60 + endM;
+        const endTotal = (endH * 60) + endM;
         if (currentTotal < endTotal) {
           flags.push('PULANG_CEPAT');
         } else if (currentTotal > endTotal) {
@@ -455,9 +456,22 @@ export default function AbsenPage() {
                   </div>
                 ) : sortedEvents?.map((ev: any, i: number) => {
                   const eventDate = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
-                  const isLate = ev.flags?.includes('TERLAMBAT');
-                  const isEarly = ev.flags?.includes('PULANG_CEPAT');
-                  const isOT = ev.flags?.includes('LEMBUR');
+                  
+                  // Deteksi label di riwayat
+                  let isLate = ev.flags?.includes('TERLAMBAT');
+                  let isEarly = ev.flags?.includes('PULANG_CEPAT');
+                  let isOT = ev.flags?.includes('LEMBUR');
+
+                  // Backup detection if flags are missing from document
+                  if (ev.type === 'tap_in' && !isLate && config?.shift) {
+                    try {
+                      const [sh, sm] = config.shift.startTime.split(':').map(Number);
+                      const grace = config.shift.graceLateMinutes || 0;
+                      const limit = (sh * 60) + sm + grace;
+                      const current = (eventDate.getHours() * 60) + eventDate.getMinutes();
+                      if (current > limit) isLate = true;
+                    } catch(e) {}
+                  }
 
                   return (
                     <div key={i} className="bg-white p-4 rounded-2xl border border-white shadow-sm flex justify-between items-center transition-all hover:shadow-md">
