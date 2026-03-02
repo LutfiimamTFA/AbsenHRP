@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { MapPin, LogOut, CheckCircle2, AlertTriangle, Loader2, Info, AlertCircle, RefreshCw, Clock, History, Camera } from 'lucide-react';
+import { MapPin, LogOut, CheckCircle2, AlertTriangle, Loader2, Info, AlertCircle, RefreshCw, Clock, History, Camera, CalendarDays } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
@@ -135,8 +135,6 @@ export default function AbsenPage() {
 
   const historyQuery = useMemo(() => {
     if (!user?.uid) return null;
-    // MENGHAPUS orderBy() untuk menghindari error 'Missing Index'
-    // Kita akan melakukan sorting di sisi klien (memory sorting)
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
@@ -146,7 +144,6 @@ export default function AbsenPage() {
 
   const { data: rawEvents, error: historyError, loading: eventsLoading } = useCollection(historyQuery);
 
-  // Sorting di sisi klien untuk memastikan data terbaru di atas tanpa butuh Index Firestore
   const sortedEvents = useMemo(() => {
     if (!rawEvents) return [];
     return [...rawEvents].sort((a: any, b: any) => {
@@ -164,6 +161,37 @@ export default function AbsenPage() {
     
     return format(latestDate, 'yyyy-MM-dd') === todayStr ? latest : null;
   }, [sortedEvents]);
+
+  const checkShiftFlags = (type: 'tap_in' | 'tap_out', time: Date) => {
+    if (!config?.shift) return [];
+    const flags: string[] = [];
+    
+    try {
+      const [startH, startM] = config.shift.startTime.split(':').map(Number);
+      const [endH, endM] = config.shift.endTime.split(':').map(Number);
+      const grace = config.shift.graceLateMinutes || 0;
+
+      const currentTotal = time.getHours() * 60 + time.getMinutes();
+      
+      if (type === 'tap_in') {
+        const startTotal = startH * 60 + startM;
+        if (currentTotal > startTotal + grace) {
+          flags.push('TERLAMBAT');
+        }
+      } else if (type === 'tap_out') {
+        const endTotal = endH * 60 + endM;
+        if (currentTotal < endTotal) {
+          flags.push('PULANG_CEPAT');
+        } else if (currentTotal > endTotal) {
+          flags.push('LEMBUR');
+        }
+      }
+    } catch (e) {
+      console.error('Error checking shift flags:', e);
+    }
+    
+    return flags;
+  };
 
   const applyWatermark = async (base64: string, statusText: string): Promise<string> => {
     return new Promise((resolve) => {
@@ -216,9 +244,11 @@ export default function AbsenPage() {
       const type = lastEvent?.type === 'tap_in' ? 'tap_out' : 'tap_in';
       const now = new Date();
       
+      const shiftFlags = checkShiftFlags(type, now);
+      
       let photoUrl = '';
       if (photoBase64) {
-        const statusLabel = `${type.replace('_',' ')} - ${zone}`;
+        const statusLabel = `${type.replace('_',' ')} - ${zone} ${shiftFlags.join(' ')}`;
         const watermarked = await applyWatermark(photoBase64, statusLabel);
         const storage = getStorage();
         const path = `attendance/${user.uid}/${Date.now()}.jpg`;
@@ -227,9 +257,9 @@ export default function AbsenPage() {
         photoUrl = await getDownloadURL(storageRef);
       }
 
-      const flags = [...anomalyFlags];
-      if (zone === 'offsite') flags.push('OFFSITE');
-      if (location.accuracy > 80) flags.push('LOW_ACCURACY');
+      const finalFlags = [...anomalyFlags, ...shiftFlags];
+      if (zone === 'offsite') finalFlags.push('OFFSITE');
+      if (location.accuracy > 80) finalFlags.push('LOW_ACCURACY');
 
       await addDoc(collection(db, 'attendance_events'), {
         uid: user.uid,
@@ -245,7 +275,7 @@ export default function AbsenPage() {
         deviceId: deviceId || 'unknown',
         mode: zone.toUpperCase(),
         photoUrl: photoUrl || null,
-        flags: flags
+        flags: finalFlags
       });
 
       toast({
@@ -317,6 +347,18 @@ export default function AbsenPage() {
           </Card>
         ) : (
           <div className="space-y-6">
+            {config?.shift && (
+              <div className="bg-primary/5 border border-primary/10 rounded-2xl p-4 flex items-center gap-3">
+                <CalendarDays className="w-5 h-5 text-primary" />
+                <div className="text-[11px]">
+                  <p className="font-bold text-primary">Jam Kerja Hari Ini</p>
+                  <p className="text-muted-foreground">
+                    {config.shift.startTime} - {config.shift.endTime} (Toleransi: {config.shift.graceLateMinutes}m)
+                  </p>
+                </div>
+              </div>
+            )}
+
             <Card className="border-none shadow-2xl rounded-[2.5rem] bg-white overflow-hidden">
               <CardContent className="pt-8 pb-10 flex flex-col items-center text-center">
                 <div className="mb-8 flex flex-wrap justify-center gap-2">
@@ -386,8 +428,8 @@ export default function AbsenPage() {
             <div className="bg-primary/5 p-4 rounded-2xl flex items-start gap-3 border border-primary/10">
               <Info className="w-5 h-5 text-primary shrink-0" />
               <div className="text-[11px] text-muted-foreground leading-relaxed">
-                <p>Radius Kantor: <span className="font-bold">{config?.office?.radiusM || 150}m</span>.</p>
-                <p className="font-bold text-primary underline">Wajib foto jika di luar area atau akurasi GPS buruk ({'>'}75m).</p>
+                <p>Radius Area Kantor: <span className="font-bold">{config?.office?.radiusM || 150}m</span>.</p>
+                <p className="font-bold text-primary underline">Wajib foto jika di luar area atau sinyal GPS lemah ({'>'}80m).</p>
               </div>
             </div>
 
@@ -413,6 +455,10 @@ export default function AbsenPage() {
                   </div>
                 ) : sortedEvents?.map((ev: any, i: number) => {
                   const eventDate = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
+                  const isLate = ev.flags?.includes('TERLAMBAT');
+                  const isEarly = ev.flags?.includes('PULANG_CEPAT');
+                  const isOT = ev.flags?.includes('LEMBUR');
+
                   return (
                     <div key={i} className="bg-white p-4 rounded-2xl border border-white shadow-sm flex justify-between items-center transition-all hover:shadow-md">
                       <div className="flex items-center gap-4">
@@ -421,9 +467,12 @@ export default function AbsenPage() {
                         </div>
                         <div>
                           <p className="font-bold text-sm uppercase">TAP {ev.type === 'tap_in' ? 'MASUK' : 'KELUAR'}</p>
-                          <p className="text-[10px] text-muted-foreground">
-                            {format(eventDate, 'eeee, d MMM yyyy', { locale: localeId })}
-                          </p>
+                          <div className="flex flex-wrap gap-1 mt-1">
+                            {isLate && <Badge variant="destructive" className="text-[8px] h-4">TERLAMBAT</Badge>}
+                            {isEarly && <Badge variant="secondary" className="text-[8px] h-4 bg-orange-500 text-white border-none">PULANG CEPAT</Badge>}
+                            {isOT && <Badge variant="default" className="text-[8px] h-4 bg-green-600 border-none">LEMBUR</Badge>}
+                            {!isLate && !isEarly && !isOT && <Badge variant="outline" className="text-[8px] h-4 border-green-200 text-green-600">TEPAT WAKTU</Badge>}
+                          </div>
                         </div>
                       </div>
                       <div className="text-right flex flex-col items-end gap-1">
