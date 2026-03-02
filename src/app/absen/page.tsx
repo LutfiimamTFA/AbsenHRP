@@ -10,7 +10,7 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { MapPin, LogOut, CheckCircle2, AlertTriangle, Loader2, Info, AlertCircle, RefreshCw, Clock, History, Camera, CalendarDays } from 'lucide-react';
+import { MapPin, LogOut, CheckCircle2, AlertTriangle, Loader2, Info, AlertCircle, RefreshCw, Clock, History, Camera } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
@@ -348,18 +348,6 @@ export default function AbsenPage() {
           </Card>
         ) : (
           <div className="space-y-6">
-            {config?.shift && (
-              <div className="bg-primary/5 border border-primary/10 rounded-2xl p-4 flex items-center gap-3">
-                <CalendarDays className="w-5 h-5 text-primary" />
-                <div className="text-[11px]">
-                  <p className="font-bold text-primary">Jam Kerja Hari Ini</p>
-                  <p className="text-muted-foreground">
-                    {config.shift.startTime} - {config.shift.endTime} (Toleransi: {config.shift.graceLateMinutes}m)
-                  </p>
-                </div>
-              </div>
-            )}
-
             <Card className="border-none shadow-2xl rounded-[2.5rem] bg-white overflow-hidden">
               <CardContent className="pt-8 pb-10 flex flex-col items-center text-center">
                 <div className="mb-8 flex flex-wrap justify-center gap-2">
@@ -457,12 +445,10 @@ export default function AbsenPage() {
                 ) : sortedEvents?.map((ev: any, i: number) => {
                   const eventDate = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
                   
-                  // Deteksi label di riwayat
                   let isLate = ev.flags?.includes('TERLAMBAT');
                   let isEarly = ev.flags?.includes('PULANG_CEPAT');
                   let isOT = ev.flags?.includes('LEMBUR');
 
-                  // Backup detection if flags are missing from document
                   if (ev.type === 'tap_in' && !isLate && config?.shift) {
                     try {
                       const [sh, sm] = config.shift.startTime.split(':').map(Number);
