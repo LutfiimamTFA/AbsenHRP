@@ -3,14 +3,14 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { signOut } from 'firebase/auth';
-import { collection, query, where, orderBy, limit, getDoc, doc, serverTimestamp, addDoc, Timestamp } from 'firebase/firestore';
+import { collection, query, where, limit, getDoc, doc, serverTimestamp, addDoc, Timestamp } from 'firebase/firestore';
 import { getStorage, ref, uploadString, getDownloadURL } from 'firebase/storage';
 import { useAuth, useFirestore, useUser, useCollection } from '@/firebase';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { MapPin, LogOut, CheckCircle2, XCircle, AlertTriangle, Loader2, Info, AlertCircle, RefreshCw, Clock, History, Camera } from 'lucide-react';
+import { MapPin, LogOut, CheckCircle2, AlertTriangle, Loader2, Info, AlertCircle, RefreshCw, Clock, History, Camera } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance } from '@/lib/geo-utils';
@@ -99,7 +99,7 @@ export default function AbsenPage() {
         }
         
         setAnomalyFlags(currentFlags);
-        setIsAnomaly(currentFlags.length > 0);
+        setIsAnomaly(currentFlags.length > 0 || newAcc > 75);
         setLocation({ lat: newLat, lng: newLng, accuracy: newAcc });
         setPrevLocation({ lat: newLat, lng: newLng, ts: now });
       },
@@ -135,39 +135,35 @@ export default function AbsenPage() {
 
   const historyQuery = useMemo(() => {
     if (!user?.uid) return null;
-    // PENTING: Filter UID wajib ada agar sesuai dengan Security Rules
-    // Dan OrderBy tsClient membutuhkan Index di Firebase Console
+    // MENGHAPUS orderBy() untuk menghindari error 'Missing Index'
+    // Kita akan melakukan sorting di sisi klien (memory sorting)
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
-      orderBy('tsClient', 'desc'),
-      limit(20)
+      limit(50)
     );
   }, [user?.uid, db]);
 
-  const { data: events, error: historyError, loading: eventsLoading } = useCollection(historyQuery);
+  const { data: rawEvents, error: historyError, loading: eventsLoading } = useCollection(historyQuery);
 
-  // Debugging untuk riwayat
-  useEffect(() => {
-    if (historyError) {
-      console.error('History Query Error:', historyError);
-    }
-    if (events) {
-      console.log('History Loaded:', events.length, 'records');
-    }
-  }, [events, historyError]);
+  // Sorting di sisi klien untuk memastikan data terbaru di atas tanpa butuh Index Firestore
+  const sortedEvents = useMemo(() => {
+    if (!rawEvents) return [];
+    return [...rawEvents].sort((a: any, b: any) => {
+      const timeA = a.tsClient instanceof Timestamp ? a.tsClient.toMillis() : new Date(a.tsClient).getTime();
+      const timeB = b.tsClient instanceof Timestamp ? b.tsClient.toMillis() : new Date(b.tsClient).getTime();
+      return timeB - timeA;
+    });
+  }, [rawEvents]);
 
   const lastEvent = useMemo(() => {
-    if (!events || events.length === 0) return null;
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const eventData = events[0] as any;
-    const eventDate = eventData.tsClient instanceof Timestamp 
-      ? eventData.tsClient.toDate() 
-      : (eventData.tsClient ? new Date(eventData.tsClient) : new Date());
+    if (!sortedEvents || sortedEvents.length === 0) return null;
+    const todayStr = format(new Date(), 'yyyy-MM-dd');
+    const latest = sortedEvents[0] as any;
+    const latestDate = latest.tsClient instanceof Timestamp ? latest.tsClient.toDate() : new Date(latest.tsClient);
     
-    return eventDate >= today ? eventData : null;
-  }, [events]);
+    return format(latestDate, 'yyyy-MM-dd') === todayStr ? latest : null;
+  }, [sortedEvents]);
 
   const applyWatermark = async (base64: string, statusText: string): Promise<string> => {
     return new Promise((resolve) => {
@@ -235,7 +231,6 @@ export default function AbsenPage() {
       if (zone === 'offsite') flags.push('OFFSITE');
       if (location.accuracy > 80) flags.push('LOW_ACCURACY');
 
-      // Simpan Event dengan Field Lengkap
       await addDoc(collection(db, 'attendance_events'), {
         uid: user.uid,
         displayName: user.displayName || 'Karyawan',
@@ -258,16 +253,17 @@ export default function AbsenPage() {
         description: `Absen ${type === 'tap_in' ? 'Masuk' : 'Keluar'} berhasil dicatat.`,
       });
       setShowCamera(false);
-      refreshLocation(); // Update status UI
+      refreshLocation();
     } catch (err: any) {
-      console.error('Tap error detail:', err);
+      console.error('Tap error:', err);
       toast({
         variant: 'destructive',
         title: 'Gagal Absen',
-        description: `Error: ${err.message || 'Masalah koneksi atau izin server.'}`,
+        description: `Error: ${err.message || 'Izin ditolak atau masalah koneksi.'}`,
       });
     } finally {
-      }
+      setSubmitting(false);
+    }
   };
 
   if (userLoading || !authReady) {
@@ -279,7 +275,7 @@ export default function AbsenPage() {
   }
 
   const type = lastEvent?.type === 'tap_in' ? 'tap_out' : 'tap_in';
-  const isFinished = lastEvent?.type === 'tap_out' && format(lastEvent.tsClient instanceof Timestamp ? lastEvent.tsClient.toDate() : new Date(), 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
+  const isFinished = lastEvent?.type === 'tap_out';
 
   return (
     <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto relative overflow-hidden">
@@ -294,7 +290,7 @@ export default function AbsenPage() {
             <div>
               <h1 className="font-bold text-lg leading-tight">{user?.displayName}</h1>
               <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
-                {user?.brandName} • {user?.division}
+                {user?.brandName} • {user?.division} • {user?.roleLabel}
               </p>
             </div>
           </div>
@@ -305,7 +301,7 @@ export default function AbsenPage() {
 
         <div className="bg-muted/50 p-3 rounded-xl flex items-center justify-between mb-6 border border-white/20">
           <p className="text-[11px] text-muted-foreground italic">
-            Anda login sebagai: <span className="font-bold text-primary">{user?.displayName}</span>
+            Login: <span className="font-bold text-primary">{user?.displayName}</span> ({user?.brandName})
           </p>
           <Badge variant="outline" className="text-[8px] bg-white">ABSENSI PRIBADI</Badge>
         </div>
@@ -326,9 +322,9 @@ export default function AbsenPage() {
                 <div className="mb-8 flex flex-wrap justify-center gap-2">
                   {location ? (
                     <>
-                      {zone === 'unknown' ? (
+                      {location.accuracy > 75 ? (
                         <Badge variant="outline" className="px-5 py-2 rounded-full text-orange-500 border-orange-200 gap-2">
-                          <AlertTriangle className="w-4 h-4" /> SINYAL LEMAH
+                          <AlertTriangle className="w-4 h-4" /> GPS BELUM AKURAT
                         </Badge>
                       ) : (
                         <Badge variant={zone === 'onsite' ? 'default' : 'secondary'} className="px-5 py-2 rounded-full gap-2">
@@ -346,11 +342,11 @@ export default function AbsenPage() {
 
                 <button
                   onClick={() => handleTap()}
-                  disabled={!location || submitting || zone === 'unknown' || isFinished}
+                  disabled={!location || submitting || isFinished}
                   className={`
                     relative w-48 h-48 rounded-full flex flex-col items-center justify-center gap-1 shadow-2xl transition-all active:scale-95
                     ${type === 'tap_in' ? 'bg-primary text-white' : 'bg-secondary text-white'}
-                    ${(!location || submitting || zone === 'unknown' || isFinished) ? 'opacity-50 grayscale' : ''}
+                    ${(!location || submitting || isFinished) ? 'opacity-50 grayscale' : ''}
                   `}
                 >
                   {submitting ? (
@@ -369,12 +365,12 @@ export default function AbsenPage() {
 
                 <div className="mt-8 w-full grid grid-cols-2 gap-4">
                   <div className="p-4 bg-muted/40 rounded-3xl border border-white text-left">
-                    <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Status</p>
+                    <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Status Lokasi</p>
                     <p className="font-bold text-sm truncate">
                       {zone === 'onsite' ? 'Dalam Kantor' : zone === 'offsite' ? 'Luar Kantor' : 'GPS Lemah'}
                     </p>
                   </div>
-                  <div className="p-4 bg-muted/40 rounded-3xl border border-white text-left relative overflow-hidden group">
+                  <div className="p-4 bg-muted/40 rounded-3xl border border-white text-left">
                     <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Akurasi GPS</p>
                     <p className="font-bold text-sm flex items-center justify-between gap-2">
                       {location ? `±${location.accuracy.toFixed(0)}m` : '--'}
@@ -390,8 +386,8 @@ export default function AbsenPage() {
             <div className="bg-primary/5 p-4 rounded-2xl flex items-start gap-3 border border-primary/10">
               <Info className="w-5 h-5 text-primary shrink-0" />
               <div className="text-[11px] text-muted-foreground leading-relaxed">
-                <p>Radius Area Kantor: <span className="font-bold">{config?.office?.radiusM || 150}m</span>.</p>
-                <p className="font-bold text-primary underline">Wajib foto jika di luar area atau sinyal GPS lemah (&gt;80m).</p>
+                <p>Radius Kantor: <span className="font-bold">{config?.office?.radiusM || 150}m</span>.</p>
+                <p className="font-bold text-primary underline">Wajib foto jika di luar area atau akurasi GPS buruk ({'>'}75m).</p>
               </div>
             </div>
 
@@ -399,11 +395,8 @@ export default function AbsenPage() {
               <div className="flex items-center justify-between">
                 <div className="flex items-center gap-2">
                   <History className="w-4 h-4 text-muted-foreground" />
-                  <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Riwayat</h2>
+                  <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Riwayat Hari Ini</h2>
                 </div>
-                {events && events.length > 0 && (
-                   <span className="text-[10px] text-muted-foreground">{events.length} Terakhir</span>
-                )}
               </div>
               
               <div className="space-y-3">
@@ -414,12 +407,12 @@ export default function AbsenPage() {
                   </div>
                 ) : historyError ? (
                   <div className="text-center p-8 bg-red-50 rounded-2xl border border-red-100">
-                    <AlertTriangle className="w-6 h-6 text-red-500 mx-auto mb-2" />
+                    <AlertCircle className="w-6 h-6 text-red-500 mx-auto mb-2" />
                     <p className="text-xs text-red-600 font-medium">Gagal memuat riwayat.</p>
-                    <p className="text-[9px] text-red-400 mt-1">Pastikan Index Firestore sudah dibuat di Firebase Console.</p>
+                    <p className="text-[9px] text-red-400 mt-1">Pastikan koneksi internet stabil.</p>
                   </div>
-                ) : events?.map((ev: any, i: number) => {
-                  const eventDate = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : (ev.tsClient ? new Date(ev.tsClient) : new Date());
+                ) : sortedEvents?.map((ev: any, i: number) => {
+                  const eventDate = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
                   return (
                     <div key={i} className="bg-white p-4 rounded-2xl border border-white shadow-sm flex justify-between items-center transition-all hover:shadow-md">
                       <div className="flex items-center gap-4">
@@ -429,7 +422,7 @@ export default function AbsenPage() {
                         <div>
                           <p className="font-bold text-sm uppercase">TAP {ev.type === 'tap_in' ? 'MASUK' : 'KELUAR'}</p>
                           <p className="text-[10px] text-muted-foreground">
-                            {format(eventDate, 'eeee, d MMM', { locale: localeId })}
+                            {format(eventDate, 'eeee, d MMM yyyy', { locale: localeId })}
                           </p>
                         </div>
                       </div>
@@ -447,10 +440,10 @@ export default function AbsenPage() {
                     </div>
                   );
                 })}
-                {(!events || events.length === 0) && !eventsLoading && !historyError && (
+                {(!sortedEvents || sortedEvents.length === 0) && !eventsLoading && !historyError && (
                   <div className="text-center p-8 border-2 border-dashed rounded-3xl opacity-50">
                     <History className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
-                    <p className="text-sm italic">Belum ada riwayat tercatat.</p>
+                    <p className="text-sm italic">Belum ada riwayat.</p>
                   </div>
                 )}
               </div>
