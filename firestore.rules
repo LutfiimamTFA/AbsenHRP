@@ -49,7 +49,12 @@ service cloud.firestore {
     // Kejadian Absensi
     match /attendance_events/{eventId} {
       // Izinkan pencarian riwayat milik sendiri
-      allow list: if isSignedIn() && request.query.limit <= 100 && request.query.filters.uid == request.auth.uid;
+      // Diperbaiki untuk menangani filter query uid sebagai list
+      allow list: if isSignedIn() && (
+        isHrd() || 
+        isSuperAdmin() || 
+        (request.query.filters.uid == [request.auth.uid])
+      );
       
       // Akses detail dokumen
       allow get: if isSignedIn() && (isHrd() || isSuperAdmin() || resource.data.uid == request.auth.uid);
