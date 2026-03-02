@@ -7,7 +7,7 @@ export default function AdminRedirect() {
   const router = useRouter();
 
   useEffect(() => {
-    // Portal monitoring admin ada di HRP, web absen hanya untuk absensi mandiri
+    // Portal monitoring admin berada di HRP, web absen dialihkan ke halaman utama
     router.replace('/absen');
   }, [router]);
 

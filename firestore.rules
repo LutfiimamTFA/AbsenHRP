@@ -1,22 +1,44 @@
-
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+    
+    function isHrd() {
+      return isSignedIn() && exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid));
+    }
+    
+    function isSuperAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
+    }
+
+    // Recruitment Rules (Preserved)
+    match /jobs/{jobId} {
+      allow read: if true;
+      allow write: if isHrd() || isSuperAdmin();
+    }
+    match /applications/{appId} {
+      allow create: if true;
+      allow read, update: if isHrd() || isSuperAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
+    }
+    match /assessments/{assessmentId} {
+      allow read, write: if isHrd() || isSuperAdmin();
+    }
+
     // Konfigurasi Absensi (HRP Managed)
     match /attendance_config/{configId} {
-      allow get: if request.auth != null;
-      allow list, write: if false; // Hanya diubah via admin portal / HRP
+      allow get: if isSignedIn();
+      allow list: if false;
+      allow create, update, delete: if isHrd() || isSuperAdmin();
     }
 
     // Profil User
     match /users/{uid} {
-      allow read: if request.auth != null && (
-        request.auth.uid == uid || 
-        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
-        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid))
-      );
-      allow write: if request.auth != null && request.auth.uid == uid;
+      allow read: if isSignedIn() && (request.auth.uid == uid || isHrd() || isSuperAdmin());
+      allow write: if isSignedIn() && request.auth.uid == uid;
     }
 
     // Role Markers (Private)
@@ -26,17 +48,24 @@ service cloud.firestore {
 
     // Kejadian Absensi
     match /attendance_events/{eventId} {
-      allow get: if request.auth != null && (
-        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
-        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
-        resource.data.uid == request.auth.uid
-      );
-      allow list: if request.auth != null && (
-        exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)) ||
-        exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) ||
-        (request.query.limit <= 100 && request.query.filters.uid == request.auth.uid)
-      );
-      allow write: if false; // Melalui Cloud Function submitAttendance
+      // Izinkan pencarian riwayat milik sendiri
+      allow list: if isSignedIn() && request.query.limit <= 100 && request.query.filters.uid == request.auth.uid;
+      
+      // Akses detail dokumen
+      allow get: if isSignedIn() && (isHrd() || isSuperAdmin() || resource.data.uid == request.auth.uid);
+      
+      // User boleh membuat absen miliknya sendiri
+      allow create: if isSignedIn() 
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.tsServer == request.time;
+        
+      allow update, delete: if false;
+    }
+
+    // Work Locations (Legacy support)
+    match /work_locations/{id} {
+      allow read: if isSignedIn();
+      allow write: if isHrd() || isSuperAdmin();
     }
   }
 }
