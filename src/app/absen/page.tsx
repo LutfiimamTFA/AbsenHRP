@@ -99,7 +99,7 @@ export default function AbsenPage() {
         }
         
         setAnomalyFlags(currentFlags);
-        setIsAnomaly(currentFlags.length > 0 || newAcc > 75);
+        setIsAnomaly(currentFlags.length > 0 || newAcc > 80);
         setLocation({ lat: newLat, lng: newLng, accuracy: newAcc });
         setPrevLocation({ lat: newLat, lng: newLng, ts: now });
       },
@@ -123,7 +123,7 @@ export default function AbsenPage() {
   useEffect(() => {
     if (location && config?.office) {
       const dist = getDistance(location.lat, location.lng, config.office.lat, config.office.lng);
-      if (location.accuracy > 150) {
+      if (location.accuracy > 100) {
         setZone('unknown');
       } else if (dist <= config.office.radiusM) {
         setZone('onsite');
@@ -153,15 +153,23 @@ export default function AbsenPage() {
     });
   }, [rawEvents]);
 
-  const lastEvent = useMemo(() => {
-    if (!sortedEvents || sortedEvents.length === 0) return null;
+  // Logika Status Hari Ini: Hanya 1 In dan 1 Out
+  const todayStatus = useMemo(() => {
     const todayStr = format(new Date(), 'yyyy-MM-dd');
     const todayEvents = sortedEvents.filter((ev: any) => {
       const date = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
       return format(date, 'yyyy-MM-dd') === todayStr;
     });
-    return todayEvents.length > 0 ? todayEvents[0] : null;
+
+    return {
+      hasIn: todayEvents.some(e => e.type === 'tap_in'),
+      hasOut: todayEvents.some(e => e.type === 'tap_out'),
+      events: todayEvents
+    };
   }, [sortedEvents]);
+
+  const isFinished = todayStatus.hasOut;
+  const nextAction = todayStatus.hasIn ? 'tap_out' : 'tap_in';
 
   const checkShiftFlags = (type: 'tap_in' | 'tap_out', time: Date) => {
     if (!config?.shift) return [];
@@ -232,9 +240,13 @@ export default function AbsenPage() {
   };
 
   const handleTap = async (photoBase64?: string) => {
-    if (!user || !location || submitting || !config) return;
+    if (!user || !location || submitting || !config || isFinished) return;
 
-    const requiresPhoto = zone === 'offsite' || location.accuracy > 80 || isAnomaly;
+    // Verifikasi ulang status hari ini untuk mencegah race condition
+    if (nextAction === 'tap_in' && todayStatus.hasIn) return;
+    if (nextAction === 'tap_out' && todayStatus.hasOut) return;
+
+    const requiresPhoto = zone === 'offsite' || location.accuracy > 100 || isAnomaly;
     if (requiresPhoto && !photoBase64) {
       setShowCamera(true);
       return;
@@ -242,14 +254,12 @@ export default function AbsenPage() {
 
     setSubmitting(true);
     try {
-      const type = lastEvent?.type === 'tap_in' ? 'tap_out' : 'tap_in';
       const now = new Date();
-      
-      const shiftFlags = checkShiftFlags(type, now);
+      const shiftFlags = checkShiftFlags(nextAction, now);
       
       let photoUrl = '';
       if (photoBase64) {
-        const statusLabel = `${type.replace('_',' ')} - ${zone} ${shiftFlags.join(' ')}`;
+        const statusLabel = `${nextAction.replace('_',' ')} - ${zone} ${shiftFlags.join(' ')}`;
         const watermarked = await applyWatermark(photoBase64, statusLabel);
         const storage = getStorage();
         const path = `attendance/${user.uid}/${Date.now()}.jpg`;
@@ -267,11 +277,12 @@ export default function AbsenPage() {
         displayName: user.displayName || 'Karyawan',
         brandId: user.brandId || '',
         division: user.division || '',
-        type,
+        type: nextAction,
         tsClient: Timestamp.fromDate(now),
         tsServer: serverTimestamp(),
         location: { lat: location.lat, lng: location.lng },
         accuracyM: location.accuracy,
+        distanceM: config?.office ? getDistance(location.lat, location.lng, config.office.lat, config.office.lng) : 0,
         isOnsite: zone === 'onsite',
         deviceId: deviceId || 'unknown',
         mode: zone.toUpperCase(),
@@ -281,7 +292,7 @@ export default function AbsenPage() {
 
       toast({
         title: 'Berhasil!',
-        description: `Absen ${type === 'tap_in' ? 'Masuk' : 'Keluar'} berhasil dicatat.`,
+        description: `Absen ${nextAction === 'tap_in' ? 'Masuk' : 'Keluar'} berhasil dicatat.`,
       });
       setShowCamera(false);
       refreshLocation();
@@ -304,9 +315,6 @@ export default function AbsenPage() {
       </div>
     );
   }
-
-  const type = lastEvent?.type === 'tap_in' ? 'tap_out' : 'tap_in';
-  const isFinished = lastEvent?.type === 'tap_out';
 
   return (
     <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto relative overflow-hidden">
@@ -332,7 +340,7 @@ export default function AbsenPage() {
 
         <div className="bg-muted/50 p-3 rounded-xl flex items-center justify-between mb-6 border border-white/20">
           <p className="text-[11px] text-muted-foreground italic">
-            Login: <span className="font-bold text-primary">{user?.displayName}</span> ({user?.brandName})
+            Login: <span className="font-bold text-primary">{user?.displayName}</span>
           </p>
           <Badge variant="outline" className="text-[8px] bg-white">ABSENSI PRIBADI</Badge>
         </div>
@@ -353,7 +361,7 @@ export default function AbsenPage() {
                 <div className="mb-8 flex flex-wrap justify-center gap-2">
                   {location ? (
                     <>
-                      {location.accuracy > 75 ? (
+                      {location.accuracy > 100 ? (
                         <Badge variant="outline" className="px-5 py-2 rounded-full text-orange-500 border-orange-200 gap-2">
                           <AlertTriangle className="w-4 h-4" /> GPS BELUM AKURAT
                         </Badge>
@@ -376,8 +384,9 @@ export default function AbsenPage() {
                   disabled={!location || submitting || isFinished}
                   className={`
                     relative w-48 h-48 rounded-full flex flex-col items-center justify-center gap-1 shadow-2xl transition-all active:scale-95
-                    ${type === 'tap_in' ? 'bg-primary text-white' : 'bg-secondary text-white'}
-                    ${(!location || submitting || isFinished) ? 'opacity-50 grayscale' : ''}
+                    ${nextAction === 'tap_in' ? 'bg-primary text-white' : 'bg-secondary text-white'}
+                    ${(isFinished) ? 'bg-gray-200 text-gray-500' : ''}
+                    ${(!location || submitting) ? 'opacity-50 grayscale' : ''}
                   `}
                 >
                   {submitting ? (
@@ -385,10 +394,10 @@ export default function AbsenPage() {
                   ) : (
                     <>
                       <span className="text-3xl font-black uppercase tracking-tighter">
-                        {isFinished ? 'SELESAI' : `TAP ${type.replace('_',' ').toUpperCase()}`}
+                        {isFinished ? 'SELESAI' : `TAP ${nextAction.replace('_',' ').toUpperCase()}`}
                       </span>
                       <span className="text-[10px] font-bold opacity-80">
-                        {isFinished ? 'Besok lagi ya!' : 'Tekan Sekali'}
+                        {isFinished ? 'Sampai Jumpa Besok!' : 'Tekan Sekali'}
                       </span>
                     </>
                   )}
@@ -398,7 +407,7 @@ export default function AbsenPage() {
                   <div className="p-4 bg-muted/40 rounded-3xl border border-white text-left">
                     <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Status Lokasi</p>
                     <p className="font-bold text-sm truncate">
-                      {zone === 'onsite' ? 'Dalam Kantor' : zone === 'offsite' ? 'Luar Kantor' : 'GPS Lemah'}
+                      {zone === 'onsite' ? 'Dalam Kantor' : zone === 'offsite' ? 'Luar Kantor' : 'Mencari...'}
                     </p>
                   </div>
                   <div className="p-4 bg-muted/40 rounded-3xl border border-white text-left">
@@ -418,7 +427,7 @@ export default function AbsenPage() {
               <Info className="w-5 h-5 text-primary shrink-0" />
               <div className="text-[11px] text-muted-foreground leading-relaxed">
                 <p>Radius Area Kantor: <span className="font-bold">{config?.office?.radiusM || 150}m</span>.</p>
-                <p className="font-bold text-primary underline">Wajib foto jika di luar area atau sinyal GPS lemah ({'>'}80m).</p>
+                <p className="font-bold text-primary underline">Wajib foto jika di luar area atau sinyal GPS lemah ({'>'}100m).</p>
               </div>
             </div>
 
@@ -440,24 +449,17 @@ export default function AbsenPage() {
                   <div className="text-center p-8 bg-red-50 rounded-2xl border border-red-100">
                     <AlertCircle className="w-6 h-6 text-red-500 mx-auto mb-2" />
                     <p className="text-xs text-red-600 font-medium">Gagal memuat riwayat.</p>
-                    <p className="text-[9px] text-red-400 mt-1">Pastikan koneksi internet stabil.</p>
                   </div>
                 ) : sortedEvents?.map((ev: any, i: number) => {
                   const eventDate = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
+                  const isToday = format(eventDate, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
                   
-                  let isLate = ev.flags?.includes('TERLAMBAT');
-                  let isEarly = ev.flags?.includes('PULANG_CEPAT');
-                  let isOT = ev.flags?.includes('LEMBUR');
+                  if (!isToday) return null;
 
-                  if (ev.type === 'tap_in' && !isLate && config?.shift) {
-                    try {
-                      const [sh, sm] = config.shift.startTime.split(':').map(Number);
-                      const grace = config.shift.graceLateMinutes || 0;
-                      const limit = (sh * 60) + sm + grace;
-                      const current = (eventDate.getHours() * 60) + eventDate.getMinutes();
-                      if (current > limit) isLate = true;
-                    } catch(e) {}
-                  }
+                  const flags = ev.flags || [];
+                  const isLate = flags.includes('TERLAMBAT');
+                  const isEarly = flags.includes('PULANG_CEPAT');
+                  const isOT = flags.includes('LEMBUR');
 
                   return (
                     <div key={i} className="bg-white p-4 rounded-2xl border border-white shadow-sm flex justify-between items-center transition-all hover:shadow-md">
@@ -489,10 +491,10 @@ export default function AbsenPage() {
                     </div>
                   );
                 })}
-                {(!sortedEvents || sortedEvents.length === 0) && !eventsLoading && !historyError && (
+                {todayStatus.events.length === 0 && !eventsLoading && !historyError && (
                   <div className="text-center p-8 border-2 border-dashed rounded-3xl opacity-50">
                     <History className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
-                    <p className="text-sm italic">Belum ada riwayat.</p>
+                    <p className="text-sm italic">Belum ada riwayat hari ini.</p>
                   </div>
                 )}
               </div>
