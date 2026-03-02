@@ -99,7 +99,6 @@ export default function AbsenPage() {
         }
         
         setAnomalyFlags(currentFlags);
-        // Akurasi buruk jika > 80m
         setIsAnomaly(currentFlags.length > 0 || newAcc > 80);
         setLocation({ lat: newLat, lng: newLng, accuracy: newAcc });
         setPrevLocation({ lat: newLat, lng: newLng, ts: now });
@@ -124,7 +123,6 @@ export default function AbsenPage() {
   useEffect(() => {
     if (location && config?.office) {
       const dist = getDistance(location.lat, location.lng, config.office.lat, config.office.lng);
-      // Jika akurasi sangat buruk (>100m), zona dianggap tidak diketahui
       if (location.accuracy > 100) {
         setZone('unknown');
       } else if (dist <= config.office.radiusM) {
@@ -155,7 +153,6 @@ export default function AbsenPage() {
     });
   }, [rawEvents]);
 
-  // Logika Status Hari Ini: Hanya 1 In dan 1 Out
   const todayStatus = useMemo(() => {
     const todayStr = format(new Date(), 'yyyy-MM-dd');
     const todayEvents = sortedEvents.filter((ev: any) => {
@@ -244,12 +241,10 @@ export default function AbsenPage() {
   const handleTap = async (photoBase64?: string) => {
     if (!user || !location || submitting || !config || isFinished) return;
 
-    // Verifikasi ulang status hari ini untuk mencegah race condition
     if (nextAction === 'tap_in' && todayStatus.hasIn) return;
     if (nextAction === 'tap_out' && todayStatus.hasOut) return;
 
-    // Wajib foto jika OFFSITE atau GPS tidak akurat
-    const requiresPhoto = zone === 'offsite' || location.accuracy > 100 || isAnomaly;
+    const requiresPhoto = zone === 'offsite' || location.accuracy > 80 || isAnomaly;
     if (requiresPhoto && !photoBase64) {
       setShowCamera(true);
       return;
@@ -364,9 +359,9 @@ export default function AbsenPage() {
                 <div className="mb-8 flex flex-wrap justify-center gap-2">
                   {location ? (
                     <>
-                      {location.accuracy > 100 ? (
+                      {location.accuracy > 80 ? (
                         <Badge variant="outline" className="px-5 py-2 rounded-full text-orange-500 border-orange-200 gap-2">
-                          <AlertTriangle className="w-4 h-4" /> GPS BELUM AKURAT
+                          <AlertTriangle className="w-4 h-4" /> SINYAL GPS LEMAH
                         </Badge>
                       ) : (
                         <Badge variant={zone === 'onsite' ? 'default' : 'secondary'} className="px-5 py-2 rounded-full gap-2">
@@ -430,7 +425,7 @@ export default function AbsenPage() {
               <Info className="w-5 h-5 text-primary shrink-0" />
               <div className="text-[11px] text-muted-foreground leading-relaxed">
                 <p>Radius Area Kantor: <span className="font-bold">{config?.office?.radiusM || 150}m</span>.</p>
-                <p className="font-bold text-primary underline">Wajib foto jika di luar area atau sinyal GPS lemah ({'>'}100m).</p>
+                <p className="font-bold text-primary underline">Wajib foto jika di luar area atau sinyal GPS lemah ({'>'}80m).</p>
               </div>
             </div>
 
@@ -464,14 +459,20 @@ export default function AbsenPage() {
                   let isEarly = flags.includes('PULANG_CEPAT');
                   let isOT = flags.includes('LEMBUR');
 
-                  // Koreksi konsistensi jika flag tidak ada (untuk data lama/sync delay)
-                  if (!isLate && !isEarly && !isOT && config?.shift) {
+                  // Deteksi dinamis berdasarkan config shift saat ini agar konsisten
+                  if (config?.shift) {
                     const [h, m] = config.shift.startTime.split(':').map(Number);
+                    const [eh, em] = config.shift.endTime.split(':').map(Number);
                     const grace = parseInt(config.shift.graceLateMinutes || "0");
-                    const limit = h * 60 + m + grace;
-                    const current = eventDate.getHours() * 60 + eventDate.getMinutes();
-                    if (ev.type === 'tap_in' && current > limit) {
-                      isLate = true;
+                    const currentMinutes = eventDate.getHours() * 60 + eventDate.getMinutes();
+                    
+                    if (ev.type === 'tap_in') {
+                      const limitMinutes = h * 60 + m + grace;
+                      if (currentMinutes > limitMinutes) isLate = true;
+                    } else if (ev.type === 'tap_out') {
+                      const endMinutes = eh * 60 + em;
+                      if (currentMinutes < endMinutes) isEarly = true;
+                      if (currentMinutes > endMinutes) isOT = true;
                     }
                   }
 
