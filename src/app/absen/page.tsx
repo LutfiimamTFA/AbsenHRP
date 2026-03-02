@@ -99,6 +99,7 @@ export default function AbsenPage() {
         }
         
         setAnomalyFlags(currentFlags);
+        // Akurasi buruk jika > 80m
         setIsAnomaly(currentFlags.length > 0 || newAcc > 80);
         setLocation({ lat: newLat, lng: newLng, accuracy: newAcc });
         setPrevLocation({ lat: newLat, lng: newLng, ts: now });
@@ -123,6 +124,7 @@ export default function AbsenPage() {
   useEffect(() => {
     if (location && config?.office) {
       const dist = getDistance(location.lat, location.lng, config.office.lat, config.office.lng);
+      // Jika akurasi sangat buruk (>100m), zona dianggap tidak diketahui
       if (location.accuracy > 100) {
         setZone('unknown');
       } else if (dist <= config.office.radiusM) {
@@ -178,7 +180,7 @@ export default function AbsenPage() {
     try {
       const [startH, startM] = config.shift.startTime.split(':').map(Number);
       const [endH, endM] = config.shift.endTime.split(':').map(Number);
-      const grace = config.shift.graceLateMinutes || 0;
+      const grace = parseInt(config.shift.graceLateMinutes || "0");
 
       const currentTotal = time.getHours() * 60 + time.getMinutes();
       
@@ -246,6 +248,7 @@ export default function AbsenPage() {
     if (nextAction === 'tap_in' && todayStatus.hasIn) return;
     if (nextAction === 'tap_out' && todayStatus.hasOut) return;
 
+    // Wajib foto jika OFFSITE atau GPS tidak akurat
     const requiresPhoto = zone === 'offsite' || location.accuracy > 100 || isAnomaly;
     if (requiresPhoto && !photoBase64) {
       setShowCamera(true);
@@ -457,9 +460,20 @@ export default function AbsenPage() {
                   if (!isToday) return null;
 
                   const flags = ev.flags || [];
-                  const isLate = flags.includes('TERLAMBAT');
-                  const isEarly = flags.includes('PULANG_CEPAT');
-                  const isOT = flags.includes('LEMBUR');
+                  let isLate = flags.includes('TERLAMBAT');
+                  let isEarly = flags.includes('PULANG_CEPAT');
+                  let isOT = flags.includes('LEMBUR');
+
+                  // Koreksi konsistensi jika flag tidak ada (untuk data lama/sync delay)
+                  if (!isLate && !isEarly && !isOT && config?.shift) {
+                    const [h, m] = config.shift.startTime.split(':').map(Number);
+                    const grace = parseInt(config.shift.graceLateMinutes || "0");
+                    const limit = h * 60 + m + grace;
+                    const current = eventDate.getHours() * 60 + eventDate.getMinutes();
+                    if (ev.type === 'tap_in' && current > limit) {
+                      isLate = true;
+                    }
+                  }
 
                   return (
                     <div key={i} className="bg-white p-4 rounded-2xl border border-white shadow-sm flex justify-between items-center transition-all hover:shadow-md">
