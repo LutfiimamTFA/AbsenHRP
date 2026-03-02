@@ -28,9 +28,9 @@ service cloud.firestore {
       allow read, write: if isHrd() || isSuperAdmin();
     }
 
-    // Konfigurasi Absensi (HRP Managed)
+    // ====== ABSENSI CONFIG (Pusat) ======
     match /attendance_config/{configId} {
-      allow get: if isSignedIn();
+      allow get: if isSignedIn(); // konfigurasi kantor dibaca semua user yang login
       allow list: if false;
       allow create, update, delete: if isHrd() || isSuperAdmin();
     }
@@ -46,15 +46,10 @@ service cloud.firestore {
     match /roles_hrd/{uid} { allow read, write: if false; }
     match /roles_manager/{uid} { allow read, write: if false; }
 
-    // Kejadian Absensi
+    // ====== EVENT ABSENSI (Riwayat) ======
     match /attendance_events/{eventId} {
       // Izinkan pencarian riwayat milik sendiri
-      // Diperbaiki untuk menangani filter query uid sebagai list
-      allow list: if isSignedIn() && (
-        isHrd() || 
-        isSuperAdmin() || 
-        (request.query.filters.uid == [request.auth.uid])
-      );
+      allow list: if isSignedIn();
       
       // Akses detail dokumen
       allow get: if isSignedIn() && (isHrd() || isSuperAdmin() || resource.data.uid == request.auth.uid);
@@ -62,7 +57,11 @@ service cloud.firestore {
       // User boleh membuat absen miliknya sendiri
       allow create: if isSignedIn() 
         && request.resource.data.uid == request.auth.uid
-        && request.resource.data.tsServer == request.time;
+        && request.resource.data.type in ['tap_in', 'tap_out']
+        && request.resource.data.tsClient is timestamp
+        && (!('accuracyM' in request.resource.data) || request.resource.data.accuracyM is number)
+        && (!('distanceM' in request.resource.data) || request.resource.data.distanceM is number)
+        && (!('isOnsite' in request.resource.data) || request.resource.data.isOnsite is bool);
         
       allow update, delete: if false;
     }
