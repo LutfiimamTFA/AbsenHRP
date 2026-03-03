@@ -19,17 +19,16 @@ service cloud.firestore {
     
     // Koleksi Lokasi Kantor (Site A/B)
     match /attendance_sites/{siteId} {
-      // Izinkan baca (get & list) untuk semua user yang login agar geofencing & site resolver jalan
+      // Izinkan baca (get & list) untuk semua user agar site resolver jalan
       allow read: if isSignedIn();
     }
     
     // Koleksi Event Absensi
     match /attendance_events/{eventId} {
       // User hanya bisa melihat dan membuat data milik sendiri
-      // Staf/Admin bisa melihat semua data (untuk Web HRP)
+      // Staf/Admin bisa melihat semua data
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
-      allow get: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
-      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff() || request.query.limit <= 50);
+      allow get, list: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
     }
 
     // Pendukung HRP

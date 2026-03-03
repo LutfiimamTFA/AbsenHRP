@@ -45,7 +45,6 @@ export function useUser() {
           resolvedRole = userData.role;
         }
 
-        // 1. Resolve Name with Priorities
         let resolvedName = userData?.displayName || userData?.name || userData?.fullName;
         
         if (!resolvedName) {
@@ -63,7 +62,6 @@ export function useUser() {
           resolvedName = firebaseUser.email.split('@')[0];
         }
 
-        // 2. Map Role Labels
         const roleLabels: Record<string, string> = {
           'karyawan': 'Karyawan',
           'employee': 'Karyawan',

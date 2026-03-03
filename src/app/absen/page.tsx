@@ -51,7 +51,6 @@ export default function AbsenPage() {
   const [submitting, setSubmitting] = useState(false);
   const [loadingSites, setLoadingSites] = useState(true);
 
-  // 1. Validasi Akses (Tolak Kandidat)
   useEffect(() => {
     if (!userLoading) {
       if (!user) {
@@ -62,7 +61,7 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // 2. SITE RESOLVER (STRICT BRAND FILTER)
+  // SITE RESOLVER - STRICT BRAND FILTERING
   useEffect(() => {
     const loadSites = async () => {
       if (!user?.brandId) {
@@ -72,21 +71,22 @@ export default function AbsenPage() {
       
       setLoadingSites(true);
       try {
-        // Log untuk debug pemilihan site
-        console.log("[DEBUG] User Brand ID:", user.brandId);
-
+        console.log("[DEBUG] Fetching sites for brand:", user.brandId);
         const q = query(
           collection(db, 'attendance_sites'),
           where('isActive', '==', true),
           where('brandIds', 'array-contains', user.brandId)
         );
         const snap = await getDocs(q);
-        const brandSites = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        // Extra client-side filter for strictness
+        const brandSites = snap.docs
+          .map(doc => ({ id: doc.id, ...doc.data() } as any))
+          .filter(site => site.brandIds?.includes(user.brandId));
         
-        console.log("[DEBUG] Candidate Sites for Brand:", brandSites.map(s => s.name));
+        console.log("[DEBUG] Found sites:", brandSites.map(s => s.name));
         setSites(brandSites);
       } catch (err: any) {
-        console.error("[SITE ERROR] Gagal load sites:", err.message);
+        console.error("[SITE ERROR]", err.message);
       } finally {
         setLoadingSites(false);
       }
@@ -94,7 +94,6 @@ export default function AbsenPage() {
     loadSites();
   }, [db, user?.brandId]);
 
-  // 3. Geolocation Watcher
   useEffect(() => {
     if (!navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
@@ -111,7 +110,6 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // 4. Pilih Site Terdekat dari Kandidat Brand
   useEffect(() => {
     if (location && sites.length > 0) {
       let closest = null;
@@ -131,7 +129,6 @@ export default function AbsenPage() {
     }
   }, [location, sites]);
 
-  // 5. Riwayat Absen
   const historyQuery = useMemo(() => {
     if (!user?.uid) return null;
     return query(
@@ -167,7 +164,6 @@ export default function AbsenPage() {
   const nextAction = todayStatus.hasIn ? 'OUT' : 'IN';
   const isFinished = todayStatus.hasOut;
 
-  // 6. Validasi Radius & Akurasi
   const isInsideRadius = useMemo(() => {
     if (distance === null || !activeSite) return false;
     return distance <= (activeSite.radiusM || 150);
@@ -181,17 +177,13 @@ export default function AbsenPage() {
 
   const canTapNormal = isInsideRadius && isAccuracyOk && activeSite;
 
-  // 7. Kalkulasi Terlambat Dinamis
   const calculateStatus = (type: 'IN' | 'OUT', now: Date, site: any) => {
     if (!site?.shift) return { status: 'NORMAL', lateMinutes: 0 };
-
     const { startTime, endTime, graceLateMinutes } = site.shift;
     const [startH, startM] = startTime.split(':').map(Number);
     const [endH, endM] = endTime.split(':').map(Number);
-
     const scheduledStart = new Date(now);
     scheduledStart.setHours(startH, startM, 0, 0);
-
     const scheduledEnd = new Date(now);
     scheduledEnd.setHours(endH, endM, 0, 0);
 
@@ -203,14 +195,11 @@ export default function AbsenPage() {
       }
       return { status: 'ON_TIME', lateMinutes: 0 };
     } else {
-      if (now < scheduledEnd) {
-        return { status: 'EARLY_LEAVE', lateMinutes: 0 };
-      }
+      if (now < scheduledEnd) return { status: 'EARLY_LEAVE', lateMinutes: 0 };
       return { status: 'ON_TIME', lateMinutes: 0 };
     }
   };
 
-  // 8. Watermark Builder (Untuk Mode Offsite)
   const applyWatermark = async (base64: string, address: string, statusText: string): Promise<string> => {
     return new Promise((resolve) => {
       const img = new Image();
@@ -221,23 +210,18 @@ export default function AbsenPage() {
         canvas.height = img.height;
         const ctx = canvas.getContext('2d');
         if (!ctx) return resolve(base64);
-
         ctx.drawImage(img, 0, 0);
         const wmHeight = canvas.height * 0.22;
         ctx.fillStyle = 'rgba(0,0,0,0.65)';
         ctx.fillRect(0, canvas.height - wmHeight, canvas.width, wmHeight);
-
         ctx.fillStyle = 'white';
         ctx.textBaseline = 'top';
         const p = 40;
-        
         ctx.font = 'bold 38px Inter, sans-serif';
         ctx.fillText(user?.displayName?.toUpperCase() || 'USER', p, canvas.height - wmHeight + 35);
-        
         ctx.font = '28px Inter, sans-serif';
-        ctx.fillText(`${user?.brandName || ''} • ${user?.division || ''}`, p, canvas.height - wmHeight + 85);
+        ctx.fillText(`${user?.brandName || ''}`, p, canvas.height - wmHeight + 85);
         ctx.fillText(format(new Date(), 'dd MMMM yyyy, HH:mm', { locale: localeId }) + ' WIB', p, canvas.height - wmHeight + 125);
-        
         ctx.font = '22px Inter, sans-serif';
         ctx.fillStyle = 'rgba(255,255,255,0.85)';
         const words = address.split(' ');
@@ -252,18 +236,15 @@ export default function AbsenPage() {
           } else { line = test; }
         }
         ctx.fillText(line, p, y);
-
         ctx.font = 'bold 44px Inter, sans-serif';
         ctx.textAlign = 'right';
         ctx.fillStyle = '#FB923C';
         ctx.fillText(statusText, canvas.width - p, canvas.height - wmHeight + 35);
-        
         resolve(canvas.toDataURL('image/jpeg', 0.8));
       };
     });
   };
 
-  // 9. Final Submission (Hybrid Mode)
   const handleTap = async (mode: 'normal' | 'photo', photoBase64?: string) => {
     if (!user || !location || submitting || isFinished) return;
     setSubmitting(true);
@@ -303,7 +284,7 @@ export default function AbsenPage() {
         flags: !isInsideRadius ? ['OFFSITE'] : []
       });
 
-      const message = status === 'LATE' ? `Absen berhasil. Terlambat ${lateMinutes} menit.` : `Absen ${nextAction} berhasil dicatat.`;
+      const message = status === 'LATE' ? `Absen berhasil. Terlambat ${lateMinutes} menit.` : `Absen ${nextAction} berhasil.`;
       toast({ title: 'Sukses!', description: message });
       setShowCamera(false);
     } catch (err: any) {
@@ -378,9 +359,6 @@ export default function AbsenPage() {
                     <p className={`text-sm font-black ${!isAccuracyOk ? 'text-destructive' : ''}`}>
                       ±{location?.accuracy.toFixed(0)}m
                     </p>
-                    {activeSite?.minGpsAccuracyM && (
-                      <p className="text-[8px] opacity-60">Batas: ≤{activeSite.minGpsAccuracyM}m</p>
-                    )}
                   </div>
                 </div>
                 {activeSite && <p className="text-center text-[10px] font-bold text-primary uppercase tracking-tighter">Site Aktif: {activeSite.name}</p>}
@@ -408,15 +386,9 @@ export default function AbsenPage() {
               </button>
 
               {(!canTapNormal && !isFinished && sites.length > 0) && (
-                <div className="text-center px-4 space-y-4 animate-in fade-in slide-in-from-bottom-2">
-                  <p className="text-xs text-muted-foreground font-medium italic">
-                    Anda berada di luar radius atau GPS belum stabil.
-                  </p>
-                  <Button 
-                    onClick={() => setShowCamera(true)} 
-                    variant="outline" 
-                    className="rounded-full px-8 py-7 h-auto border-primary/20 bg-primary/5 hover:bg-primary/10 gap-3"
-                  >
+                <div className="text-center px-4 space-y-4">
+                  <p className="text-xs text-muted-foreground font-medium italic">Anda berada di luar radius.</p>
+                  <Button onClick={() => setShowCamera(true)} variant="outline" className="rounded-full px-8 py-7 h-auto border-primary/20 bg-primary/5 hover:bg-primary/10 gap-3">
                     <Camera className="w-6 h-6 text-primary" />
                     <div className="text-left">
                       <p className="text-xs font-bold leading-none mb-1 uppercase">Absen Foto</p>
@@ -452,14 +424,9 @@ export default function AbsenPage() {
                        </div>
                        <div className="text-right">
                          <p className="text-sm font-black">{format(dt, 'HH:mm')}</p>
-                         <div className="flex flex-col items-end gap-1">
-                           <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.status === 'LATE' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
-                             {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : (ev.status === 'ON_TIME' ? 'TEPAT WAKTU' : 'NORMAL')}
-                           </Badge>
-                           <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.mode === 'photo' ? 'bg-orange-50 text-orange-600' : 'bg-green-50 text-green-600'}`}>
-                             {ev.mode === 'photo' ? 'OFFSITE' : 'ONSITE'}
-                           </Badge>
-                         </div>
+                         <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.status === 'LATE' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
+                           {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : (ev.status === 'ON_TIME' ? 'TEPAT WAKTU' : 'NORMAL')}
+                         </Badge>
                        </div>
                      </div>
                    );
@@ -483,22 +450,13 @@ export default function AbsenPage() {
                           <p className="text-[10px] font-bold text-muted-foreground mb-0.5">{format(dt, 'EEEE, dd MMM yyyy', { locale: localeId })}</p>
                           <p className="text-xs font-black uppercase tracking-tight">TAP {ev.type} • {ev.siteName}</p>
                         </div>
-                        <div className="flex flex-col items-end gap-1">
-                          <Badge variant="outline" className={`text-[9px] rounded-full px-3 ${ev.status === 'LATE' ? 'border-red-200 text-red-600 bg-red-50' : 'border-green-200 text-green-600 bg-green-50'}`}>
-                            {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : (ev.status === 'ON_TIME' ? 'TEPAT WAKTU' : 'NORMAL')}
-                          </Badge>
-                          <Badge variant="outline" className="text-[9px] rounded-full px-3">
-                            {ev.mode?.toUpperCase() || 'NORMAL'}
-                          </Badge>
-                        </div>
+                        <Badge variant="outline" className={`text-[9px] rounded-full px-3 ${ev.status === 'LATE' ? 'border-red-200 text-red-600 bg-red-50' : 'border-green-200 text-green-600 bg-green-50'}`}>
+                          {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : (ev.status === 'ON_TIME' ? 'TEPAT WAKTU' : 'NORMAL')}
+                        </Badge>
                       </div>
                       <div className="flex items-start gap-2 mt-2">
                         <MapPin className="w-3 h-3 text-muted-foreground mt-0.5 shrink-0" />
                         <span className="text-[10px] text-muted-foreground leading-tight">{ev.address || 'Alamat tidak tercatat'}</span>
-                      </div>
-                      <div className="flex items-center gap-2 mt-2">
-                        <Clock className="w-3 h-3 text-muted-foreground" />
-                        <span className="text-xs font-bold">{format(dt, 'HH:mm')} WIB</span>
                       </div>
                     </div>
                   );
