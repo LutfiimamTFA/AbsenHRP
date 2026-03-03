@@ -5,19 +5,27 @@ service cloud.firestore {
       return request.auth != null;
     }
     
+    // Fungsi pembantu untuk mengecek apakah user adalah admin/staf HRP
+    function isStaff() {
+      return isSignedIn() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['hrd', 'manager', 'superadmin', 'super-admin'];
+    }
+    
     match /users/{uid} {
-      allow read: if isSignedIn() && request.auth.uid == uid;
-      allow write: if isSignedIn() && request.auth.uid == uid;
+      allow read, write: if isSignedIn() && request.auth.uid == uid;
     }
     
     match /attendance_sites/{siteId} {
+      // Izinkan baca (get & list) untuk semua user yang login agar geofencing jalan
       allow read: if isSignedIn();
     }
     
     match /attendance_events/{eventId} {
-      allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
+      // User hanya bisa melihat dan membuat data milik sendiri
+      // Staf/Admin bisa melihat semua data (untuk Web HRP)
+      allow read: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
-      allow list: if isSignedIn() && request.query.limit <= 50;
+      allow list: if isSignedIn() && (request.query.limit <= 50 || resource.data.uid == request.auth.uid || isStaff());
     }
 
     match /profiles/{uid} {
@@ -26,6 +34,11 @@ service cloud.firestore {
     
     match /brands/{brandId} {
       allow read: if isSignedIn();
+    }
+    
+    // Fallback untuk koleksi lain yang mungkin diakses HRP
+    match /{path=**} {
+      allow read: if isStaff();
     }
   }
 }

@@ -51,7 +51,6 @@ export default function AbsenPage() {
   const [submitting, setSubmitting] = useState(false);
   const [loadingSites, setLoadingSites] = useState(true);
 
-  // 1. Role Check & Auth Redirect
   useEffect(() => {
     if (!userLoading) {
       if (!user) {
@@ -62,7 +61,6 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // 2. Multi-Site Loading with Strict Brand Filter
   useEffect(() => {
     const loadSites = async () => {
       if (!user?.brandId) {
@@ -79,11 +77,15 @@ export default function AbsenPage() {
         const snap = await getDocs(q);
         const allSites = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         
-        // STRICT FILTER: Hanya site yang brandIds-nya mengandung brandId user
+        // STRICT FILTER: Hanya site yang brandIds-nya mengandung brandId user SECARA PERSIS
         const brandSites = allSites.filter((s: any) => {
           if (!s.brandIds || !Array.isArray(s.brandIds)) return false;
-          return s.brandIds.includes(user.brandId);
+          // Pastikan perbandingan case-insensitive dan trimmed untuk keamanan
+          return s.brandIds.some((b: string) => b.toLowerCase().trim() === user.brandId?.toLowerCase().trim());
         });
+
+        console.log("[DEBUG] User Brand ID:", user.brandId);
+        console.log("[DEBUG] Candidate Sites for Brand:", brandSites.map(s => s.name));
 
         setSites(brandSites);
       } catch (err: any) {
@@ -95,7 +97,6 @@ export default function AbsenPage() {
     loadSites();
   }, [db, user?.brandId]);
 
-  // 3. High Accuracy GPS Tracking
   useEffect(() => {
     if (!navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
@@ -112,7 +113,6 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // 4. Site Selection (Nearest)
   useEffect(() => {
     if (location && sites.length > 0) {
       let closest = null;
@@ -126,13 +126,12 @@ export default function AbsenPage() {
       });
       setActiveSite(closest);
       setDistance(minD);
-    } else if (sites.length === 0) {
+    } else {
       setActiveSite(null);
       setDistance(null);
     }
   }, [location, sites]);
 
-  // 5. History Loading
   const historyQuery = useMemo(() => {
     if (!user?.uid) return null;
     return query(
@@ -380,7 +379,7 @@ export default function AbsenPage() {
                     )}
                   </div>
                 </div>
-                {activeSite && <p className="text-center text-[10px] font-bold text-primary uppercase tracking-tighter">Site: {activeSite.name}</p>}
+                {activeSite && <p className="text-center text-[10px] font-bold text-primary uppercase tracking-tighter">Site Aktif: {activeSite.name}</p>}
               </CardContent>
             </Card>
 
