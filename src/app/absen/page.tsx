@@ -51,6 +51,7 @@ export default function AbsenPage() {
   const [submitting, setSubmitting] = useState(false);
   const [loadingSites, setLoadingSites] = useState(true);
 
+  // 1. Validasi Akses (Tolak Kandidat)
   useEffect(() => {
     if (!userLoading) {
       if (!user) {
@@ -61,6 +62,7 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
+  // 2. SITE RESOLVER (STRICT BRAND FILTER)
   useEffect(() => {
     const loadSites = async () => {
       if (!user?.brandId) {
@@ -70,26 +72,21 @@ export default function AbsenPage() {
       
       setLoadingSites(true);
       try {
+        // Log untuk debug pemilihan site
+        console.log("[DEBUG] User Brand ID:", user.brandId);
+
         const q = query(
           collection(db, 'attendance_sites'),
-          where('isActive', '==', true)
+          where('isActive', '==', true),
+          where('brandIds', 'array-contains', user.brandId)
         );
         const snap = await getDocs(q);
-        const allSites = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        const brandSites = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         
-        // STRICT FILTER: Hanya site yang brandIds-nya mengandung brandId user SECARA PERSIS
-        const brandSites = allSites.filter((s: any) => {
-          if (!s.brandIds || !Array.isArray(s.brandIds)) return false;
-          // Pastikan perbandingan case-insensitive dan trimmed untuk keamanan
-          return s.brandIds.some((b: string) => b.toLowerCase().trim() === user.brandId?.toLowerCase().trim());
-        });
-
-        console.log("[DEBUG] User Brand ID:", user.brandId);
         console.log("[DEBUG] Candidate Sites for Brand:", brandSites.map(s => s.name));
-
         setSites(brandSites);
       } catch (err: any) {
-        console.error("[SITE ERROR]", err.message);
+        console.error("[SITE ERROR] Gagal load sites:", err.message);
       } finally {
         setLoadingSites(false);
       }
@@ -97,6 +94,7 @@ export default function AbsenPage() {
     loadSites();
   }, [db, user?.brandId]);
 
+  // 3. Geolocation Watcher
   useEffect(() => {
     if (!navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
@@ -113,6 +111,7 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
+  // 4. Pilih Site Terdekat dari Kandidat Brand
   useEffect(() => {
     if (location && sites.length > 0) {
       let closest = null;
@@ -132,6 +131,7 @@ export default function AbsenPage() {
     }
   }, [location, sites]);
 
+  // 5. Riwayat Absen
   const historyQuery = useMemo(() => {
     if (!user?.uid) return null;
     return query(
@@ -167,6 +167,7 @@ export default function AbsenPage() {
   const nextAction = todayStatus.hasIn ? 'OUT' : 'IN';
   const isFinished = todayStatus.hasOut;
 
+  // 6. Validasi Radius & Akurasi
   const isInsideRadius = useMemo(() => {
     if (distance === null || !activeSite) return false;
     return distance <= (activeSite.radiusM || 150);
@@ -180,6 +181,7 @@ export default function AbsenPage() {
 
   const canTapNormal = isInsideRadius && isAccuracyOk && activeSite;
 
+  // 7. Kalkulasi Terlambat Dinamis
   const calculateStatus = (type: 'IN' | 'OUT', now: Date, site: any) => {
     if (!site?.shift) return { status: 'NORMAL', lateMinutes: 0 };
 
@@ -208,6 +210,7 @@ export default function AbsenPage() {
     }
   };
 
+  // 8. Watermark Builder (Untuk Mode Offsite)
   const applyWatermark = async (base64: string, address: string, statusText: string): Promise<string> => {
     return new Promise((resolve) => {
       const img = new Image();
@@ -260,6 +263,7 @@ export default function AbsenPage() {
     });
   };
 
+  // 9. Final Submission (Hybrid Mode)
   const handleTap = async (mode: 'normal' | 'photo', photoBase64?: string) => {
     if (!user || !location || submitting || isFinished) return;
     setSubmitting(true);

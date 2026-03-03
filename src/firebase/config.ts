@@ -1,5 +1,6 @@
 /**
  * @fileOverview Firebase Configuration for Project studio-9262077557-bc9c9
+ * Konfigurasi ini menghubungkan aplikasi ke database HRP yang benar.
  */
 
 export const firebaseConfig = {

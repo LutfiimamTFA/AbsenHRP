@@ -1,33 +1,38 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
+    // Fungsi pembantu umum
     function isSignedIn() {
       return request.auth != null;
     }
     
-    // Fungsi pembantu untuk mengecek apakah user adalah admin/staf HRP
     function isStaff() {
       return isSignedIn() && 
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['hrd', 'manager', 'superadmin', 'super-admin'];
     }
-    
+
+    // Koleksi Profil User
     match /users/{uid} {
       allow read, write: if isSignedIn() && request.auth.uid == uid;
+      allow get: if isSignedIn();
     }
     
+    // Koleksi Lokasi Kantor (Site A/B)
     match /attendance_sites/{siteId} {
-      // Izinkan baca (get & list) untuk semua user yang login agar geofencing jalan
+      // Izinkan baca (get & list) untuk semua user yang login agar geofencing & site resolver jalan
       allow read: if isSignedIn();
     }
     
+    // Koleksi Event Absensi
     match /attendance_events/{eventId} {
       // User hanya bisa melihat dan membuat data milik sendiri
       // Staf/Admin bisa melihat semua data (untuk Web HRP)
-      allow read: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
-      allow list: if isSignedIn() && (request.query.limit <= 50 || resource.data.uid == request.auth.uid || isStaff());
+      allow get: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
+      allow list: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff() || request.query.limit <= 50);
     }
 
+    // Pendukung HRP
     match /profiles/{uid} {
       allow read: if isSignedIn();
     }
@@ -36,7 +41,7 @@ service cloud.firestore {
       allow read: if isSignedIn();
     }
     
-    // Fallback untuk koleksi lain yang mungkin diakses HRP
+    // Fallback untuk akses admin HRP ke koleksi lain
     match /{path=**} {
       allow read: if isStaff();
     }
