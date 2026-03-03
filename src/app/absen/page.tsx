@@ -1,19 +1,20 @@
+
 'use client';
 
 import React, { useState, useEffect, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { signOut } from 'firebase/auth';
-import { collection, query, where, limit, getDoc, doc, serverTimestamp, addDoc, Timestamp } from 'firebase/firestore';
+import { collection, query, where, getDocs, addDoc, serverTimestamp, Timestamp, orderBy, limit } from 'firebase/firestore';
 import { getStorage, ref, uploadString, getDownloadURL } from 'firebase/storage';
 import { useAuth, useFirestore, useUser, useCollection } from '@/firebase';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { Avatar, AvatarFallback } from '@/components/ui/avatar';
-import { MapPin, LogOut, CheckCircle2, AlertTriangle, Loader2, Info, AlertCircle, RefreshCw, Clock, History, Camera } from 'lucide-react';
+import { MapPin, LogOut, CheckCircle2, AlertTriangle, Loader2, Info, RefreshCw, Clock, History, Camera, Navigation } from 'lucide-react';
 import { useDeviceId } from '@/hooks/use-device-id';
 import { useToast } from '@/hooks/use-toast';
-import { getDistance } from '@/lib/geo-utils';
+import { getDistance, getAddressFromLatLng } from '@/lib/geo-utils';
 import { CameraCapture } from '@/components/camera-capture';
 import { format } from 'date-fns';
 import { id as localeId } from 'date-fns/locale';
@@ -25,183 +26,153 @@ export default function AbsenPage() {
   const router = useRouter();
   const { toast } = useToast();
   
-  const [authReady, setAuthReady] = useState(false);
   const [location, setLocation] = useState<{ lat: number; lng: number; accuracy: number } | null>(null);
-  const [prevLocation, setPrevLocation] = useState<{ lat: number; lng: number; ts: number } | null>(null);
-  const [zone, setZone] = useState<'onsite' | 'offsite' | 'unknown'>('unknown');
-  const [config, setConfig] = useState<any>(null);
+  const [sites, setSites] = useState<any[]>([]);
+  const [activeSite, setActiveSite] = useState<any>(null);
+  const [distance, setDistance] = useState<number | null>(null);
   const [showCamera, setShowCamera] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [configLoaded, setConfigLoaded] = useState(false);
-  const [configError, setConfigError] = useState<string | null>(null);
-  const [isAnomaly, setIsAnomaly] = useState(false);
-  const [anomalyFlags, setAnomalyFlags] = useState<string[]>([]);
+  const [loadingSites, setLoadingSites] = useState(true);
   
   const deviceId = useDeviceId();
 
+  // Redirect logic
   useEffect(() => {
     if (!userLoading) {
-      setAuthReady(true);
-      if (user) {
-        if (user.role === 'kandidat') {
-          router.push('/unauthorized');
-        }
-      } else {
+      if (!user) {
         router.push('/login');
+      } else if (user.role === 'kandidat') {
+        router.push('/unauthorized');
       }
     }
   }, [user, userLoading, router]);
 
+  // Load Sites
   useEffect(() => {
-    const loadConfig = async () => {
-      if (!authReady || !user || configLoaded) return;
+    const loadSites = async () => {
+      if (!user?.brandId) return;
+      setLoadingSites(true);
       try {
-        const configDocRef = doc(db, 'attendance_config', 'default');
-        const snap = await getDoc(configDocRef);
-        
-        if (snap.exists()) {
-          const data = snap.data();
-          if (data.office && data.shift) {
-            setConfig(data);
-          } else {
-            setConfigError('Pengaturan kantor belum lengkap di HRP.');
-          }
-        } else {
-          setConfigError('Konfigurasi absensi belum diatur di HRP.');
-        }
-      } catch (err: any) {
-        console.error('Load config error:', err);
-        setConfigError(`Gagal memuat konfigurasi: ${err.message || 'Error tidak dikenal'}`);
+        const q = query(
+          collection(db, 'attendance_sites'),
+          where('isActive', '==', true),
+          where('brandIds', 'array-contains', user.brandId)
+        );
+        const snap = await getDocs(q);
+        const siteData = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+        setSites(siteData);
+      } catch (err) {
+        console.error("Error loading sites:", err);
       } finally {
-        setConfigLoaded(true);
+        setLoadingSites(false);
       }
     };
-    loadConfig();
-  }, [authReady, user, db, configLoaded]);
+    loadSites();
+  }, [db, user?.brandId]);
 
-  const refreshLocation = () => {
+  // GPS Tracking
+  useEffect(() => {
     if (!navigator.geolocation) return;
-    navigator.geolocation.getCurrentPosition(
+    const watchId = navigator.geolocation.watchPosition(
       (pos) => {
-        const newLat = pos.coords.latitude;
-        const newLng = pos.coords.longitude;
-        const newAcc = pos.coords.accuracy;
-        const now = Date.now();
-
-        const currentFlags: string[] = [];
-        if (prevLocation) {
-          const dist = getDistance(prevLocation.lat, prevLocation.lng, newLat, newLng);
-          const timeSec = (now - prevLocation.ts) / 1000;
-          const speed = dist / (timeSec || 1); 
-          if (speed > 500 && timeSec > 5) {
-            currentFlags.push('location_jump');
-          }
-        }
-        
-        setAnomalyFlags(currentFlags);
-        setIsAnomaly(currentFlags.length > 0 || newAcc > 80);
-        setLocation({ lat: newLat, lng: newLng, accuracy: newAcc });
-        setPrevLocation({ lat: newLat, lng: newLng, ts: now });
-      },
-      (err) => {
-        toast({
-          variant: 'destructive',
-          title: 'Gagal Refresh Lokasi',
-          description: 'Mohon izinkan akses GPS di pengaturan browser.',
+        setLocation({
+          lat: pos.coords.latitude,
+          lng: pos.coords.longitude,
+          accuracy: pos.coords.accuracy
         });
       },
+      (err) => console.error("GPS Error:", err),
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
-  };
+    return () => navigator.geolocation.clearWatch(watchId);
+  }, []);
 
+  // Proximity Site Selection
   useEffect(() => {
-    if (authReady && user) {
-      refreshLocation();
+    if (location && sites.length > 0) {
+      let closest = null;
+      let minD = Infinity;
+      sites.forEach(site => {
+        const d = getDistance(location.lat, location.lng, site.office.lat, site.office.lng);
+        if (d < minD) {
+          minD = d;
+          closest = site;
+        }
+      });
+      setActiveSite(closest);
+      setDistance(minD);
     }
-  }, [authReady, user]);
-
-  useEffect(() => {
-    if (location && config?.office) {
-      const dist = getDistance(location.lat, location.lng, config.office.lat, config.office.lng);
-      if (location.accuracy > 100) {
-        setZone('unknown');
-      } else if (dist <= config.office.radiusM) {
-        setZone('onsite');
-      } else {
-        setZone('offsite');
-      }
-    }
-  }, [location, config]);
+  }, [location, sites]);
 
   const historyQuery = useMemo(() => {
     if (!user?.uid) return null;
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid),
-      limit(50)
+      orderBy('tsClient', 'desc'),
+      limit(20)
     );
   }, [user?.uid, db]);
 
-  const { data: rawEvents, error: historyError, loading: eventsLoading } = useCollection(historyQuery);
-
-  const sortedEvents = useMemo(() => {
-    if (!rawEvents) return [];
-    return [...rawEvents].sort((a: any, b: any) => {
-      const timeA = a.tsClient instanceof Timestamp ? a.tsClient.toMillis() : new Date(a.tsClient).getTime();
-      const timeB = b.tsClient instanceof Timestamp ? b.tsClient.toMillis() : new Date(b.tsClient).getTime();
-      return timeB - timeA;
-    });
-  }, [rawEvents]);
+  const { data: rawEvents, loading: eventsLoading } = useCollection(historyQuery);
 
   const todayStatus = useMemo(() => {
+    if (!rawEvents) return { hasIn: false, hasOut: false };
     const todayStr = format(new Date(), 'yyyy-MM-dd');
-    const todayEvents = sortedEvents.filter((ev: any) => {
-      const date = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
-      return format(date, 'yyyy-MM-dd') === todayStr;
+    const todayEvents = rawEvents.filter((ev: any) => {
+      const d = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
+      return format(d, 'yyyy-MM-dd') === todayStr;
     });
-
     return {
-      hasIn: todayEvents.some(e => e.type === 'tap_in'),
-      hasOut: todayEvents.some(e => e.type === 'tap_out'),
+      hasIn: todayEvents.some(e => e.type === 'IN'),
+      hasOut: todayEvents.some(e => e.type === 'OUT'),
       events: todayEvents
     };
-  }, [sortedEvents]);
+  }, [rawEvents]);
 
+  const nextAction = todayStatus.hasIn ? 'OUT' : 'IN';
   const isFinished = todayStatus.hasOut;
-  const nextAction = todayStatus.hasIn ? 'tap_out' : 'tap_in';
 
-  const checkShiftFlags = (type: 'tap_in' | 'tap_out', time: Date) => {
-    if (!config?.shift) return [];
-    const flags: string[] = [];
-    
+  const isInsideRadius = useMemo(() => {
+    if (!distance || !activeSite) return false;
+    return distance <= activeSite.radiusM;
+  }, [distance, activeSite]);
+
+  const isAccuracyOk = useMemo(() => {
+    if (!location || !activeSite) return true;
+    if (activeSite.minGpsAccuracyM) return location.accuracy <= activeSite.minGpsAccuracyM;
+    return true;
+  }, [location, activeSite]);
+
+  const canTapNormal = isInsideRadius && isAccuracyOk;
+
+  const calculateShiftStatus = (type: 'IN' | 'OUT', time: Date, shift: any) => {
+    if (!shift) return { status: 'ON_TIME', minutes: 0 };
     try {
-      const [startH, startM] = config.shift.startTime.split(':').map(Number);
-      const [endH, endM] = config.shift.endTime.split(':').map(Number);
-      const grace = parseInt(config.shift.graceLateMinutes || "0");
-
-      const currentTotal = time.getHours() * 60 + time.getMinutes();
+      const [sh, sm] = shift.startTime.split(':').map(Number);
+      const [eh, em] = shift.endTime.split(':').map(Number);
+      const grace = shift.graceLateMinutes || 0;
       
-      if (type === 'tap_in') {
-        const startTotal = (startH * 60) + startM;
-        if (currentTotal > (startTotal + grace)) {
-          flags.push('TERLAMBAT');
+      const currentMinutes = time.getHours() * 60 + time.getMinutes();
+      
+      if (type === 'IN') {
+        const startLimit = sh * 60 + sm + grace;
+        if (currentMinutes > startLimit) {
+          return { status: 'LATE', minutes: currentMinutes - (sh * 60 + sm) };
         }
-      } else if (type === 'tap_out') {
-        const endTotal = (endH * 60) + endM;
-        if (currentTotal < endTotal) {
-          flags.push('PULANG_CEPAT');
-        } else if (currentTotal > endTotal) {
-          flags.push('LEMBUR');
+      } else {
+        const endLimit = eh * 60 + em;
+        if (currentMinutes < endLimit) {
+          return { status: 'EARLY_LEAVE', minutes: endLimit - currentMinutes };
+        } else if (currentMinutes > endLimit) {
+          return { status: 'OVERTIME', minutes: currentMinutes - endLimit };
         }
       }
-    } catch (e) {
-      console.error('Error checking shift flags:', e);
-    }
-    
-    return flags;
+    } catch (e) { console.error("Shift calc error:", e); }
+    return { status: 'ON_TIME', minutes: 0 };
   };
 
-  const applyWatermark = async (base64: string, statusText: string): Promise<string> => {
+  const applyWatermark = async (base64: string, address: string, status: string): Promise<string> => {
     return new Promise((resolve) => {
       const img = new Image();
       img.src = base64;
@@ -213,52 +184,67 @@ export default function AbsenPage() {
         if (!ctx) return resolve(base64);
 
         ctx.drawImage(img, 0, 0);
+        
+        // Watermark Box (Bottom ~20%)
+        const wmHeight = canvas.height * 0.22;
         ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(0, canvas.height - 200, canvas.width, 200);
+        ctx.fillRect(0, canvas.height - wmHeight, canvas.width, wmHeight);
 
         ctx.fillStyle = 'white';
-        const now = new Date();
-        const timeStr = format(now, 'HH:mm:ss');
-        const dateStr = format(now, 'dd MMM yyyy', { locale: localeId });
+        ctx.textBaseline = 'top';
+        const padding = 40;
         
-        ctx.font = 'bold 36px Inter, sans-serif';
-        ctx.fillText(`${user?.displayName || 'Karyawan'}`, 40, canvas.height - 140);
-        
-        ctx.font = '26px Inter, sans-serif';
-        ctx.fillText(`${user?.brandName || ''} • ${user?.division || ''}`, 40, canvas.height - 100);
-        ctx.fillText(`${dateStr} - ${timeStr} WIB`, 40, canvas.height - 65);
-        ctx.fillText(`GPS: ${location?.lat.toFixed(6)}, ${location?.lng.toFixed(6)} (±${location?.accuracy.toFixed(0)}m)`, 40, canvas.height - 30);
-        
+        // Name
         ctx.font = 'bold 32px Inter, sans-serif';
+        ctx.fillText(user?.displayName?.toUpperCase() || 'KARYAWAN', padding, canvas.height - wmHeight + 30);
+        
+        // Info
+        ctx.font = '24px Inter, sans-serif';
+        ctx.fillText(`${user?.brandName || ''} • ${user?.division || ''}`, padding, canvas.height - wmHeight + 75);
+        ctx.fillText(`${format(new Date(), 'dd MMMM yyyy, HH:mm', { locale: localeId })} WIB`, padding, canvas.height - wmHeight + 110);
+        
+        // Address (Wrapped)
+        ctx.font = 'italic 20px Inter, sans-serif';
+        const maxWidth = canvas.width - (padding * 2);
+        const words = address.split(' ');
+        let line = '';
+        let y = canvas.height - wmHeight + 150;
+        for(let n = 0; n < words.length; n++) {
+          let testLine = line + words[n] + ' ';
+          let metrics = ctx.measureText(testLine);
+          if (metrics.width > maxWidth && n > 0) {
+            ctx.fillText(line, padding, y);
+            line = words[n] + ' ';
+            y += 28;
+          } else {
+            line = testLine;
+          }
+        }
+        ctx.fillText(line, padding, y);
+
+        // Status Tag
+        ctx.font = 'bold 40px Inter, sans-serif';
         ctx.textAlign = 'right';
-        ctx.fillText(statusText.toUpperCase(), canvas.width - 40, canvas.height - 30);
+        ctx.fillText(status, canvas.width - padding, canvas.height - wmHeight + 30);
         
         resolve(canvas.toDataURL('image/jpeg', 0.8));
       };
     });
   };
 
-  const handleTap = async (photoBase64?: string) => {
-    if (!user || !location || submitting || !config || isFinished) return;
-
-    if (nextAction === 'tap_in' && todayStatus.hasIn) return;
-    if (nextAction === 'tap_out' && todayStatus.hasOut) return;
-
-    const requiresPhoto = zone === 'offsite' || location.accuracy > 80 || isAnomaly;
-    if (requiresPhoto && !photoBase64) {
-      setShowCamera(true);
-      return;
-    }
-
+  const handleTap = async (mode: 'normal' | 'photo', photoBase64?: string) => {
+    if (!user || !location || !activeSite || submitting || isFinished) return;
+    
     setSubmitting(true);
     try {
       const now = new Date();
-      const shiftFlags = checkShiftFlags(nextAction, now);
+      const { status, minutes } = calculateShiftStatus(nextAction, now, activeSite.shift);
+      const address = await getAddressFromLatLng(location.lat, location.lng);
       
-      let photoUrl = '';
-      if (photoBase64) {
-        const statusLabel = `${nextAction.replace('_',' ')} - ${zone} ${shiftFlags.join(' ')}`;
-        const watermarked = await applyWatermark(photoBase64, statusLabel);
+      let photoUrl = null;
+      if (mode === 'photo' && photoBase64) {
+        const wmStatus = `${nextAction === 'IN' ? 'MASUK' : 'PULANG'} - OFFSITE`;
+        const watermarked = await applyWatermark(photoBase64, address, wmStatus);
         const storage = getStorage();
         const path = `attendance/${user.uid}/${Date.now()}.jpg`;
         const storageRef = ref(storage, path);
@@ -266,69 +252,55 @@ export default function AbsenPage() {
         photoUrl = await getDownloadURL(storageRef);
       }
 
-      const finalFlags = [...anomalyFlags, ...shiftFlags];
-      if (zone === 'offsite') finalFlags.push('OFFSITE');
-      if (location.accuracy > 80) finalFlags.push('LOW_ACCURACY');
-
       await addDoc(collection(db, 'attendance_events'), {
         uid: user.uid,
-        displayName: user.displayName || 'Karyawan',
-        brandId: user.brandId || '',
-        division: user.division || '',
+        userName: user.displayName,
+        brandId: user.brandId,
+        siteId: activeSite.id,
+        siteName: activeSite.name,
         type: nextAction,
         tsClient: Timestamp.fromDate(now),
         tsServer: serverTimestamp(),
-        location: { lat: location.lat, lng: location.lng },
-        accuracyM: location.accuracy,
-        distanceM: config?.office ? getDistance(location.lat, location.lng, config.office.lat, config.office.lng) : 0,
-        isOnsite: zone === 'onsite',
-        deviceId: deviceId || 'unknown',
-        mode: zone.toUpperCase(),
-        photoUrl: photoUrl || null,
-        flags: finalFlags
+        mode,
+        geo: { lat: location.lat, lng: location.lng, accuracyM: location.accuracy },
+        insideRadius: isInsideRadius,
+        distanceM: Math.round(distance || 0),
+        address,
+        status,
+        minutes,
+        photoUrl,
+        deviceId: deviceId || 'web',
+        shiftSnapshot: activeSite.shift
       });
 
       toast({
         title: 'Berhasil!',
-        description: `Absen ${nextAction === 'tap_in' ? 'Masuk' : 'Keluar'} berhasil dicatat.`,
+        description: `Absen ${nextAction === 'IN' ? 'Masuk' : 'Pulang'} berhasil dicatat.`,
       });
       setShowCamera(false);
-      refreshLocation();
     } catch (err: any) {
-      console.error('Tap error:', err);
-      toast({
-        variant: 'destructive',
-        title: 'Gagal Absen',
-        description: `Error: ${err.message || 'Izin ditolak atau masalah koneksi.'}`,
-      });
+      toast({ variant: 'destructive', title: 'Gagal Absen', description: err.message });
     } finally {
       setSubmitting(false);
     }
   };
 
-  if (userLoading || !authReady) {
-    return (
-      <div className="min-h-svh flex items-center justify-center">
-        <Loader2 className="w-8 h-8 animate-spin text-primary" />
-      </div>
-    );
+  if (userLoading || loadingSites) {
+    return <div className="min-h-svh flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>;
   }
 
   return (
-    <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto relative overflow-hidden">
-      <div className="p-6">
-        <div className="flex justify-between items-center mb-6">
+    <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto relative">
+      <div className="p-6 pb-24">
+        {/* Header */}
+        <div className="flex justify-between items-center mb-8">
           <div className="flex items-center gap-3">
-            <Avatar className="w-12 h-12 border-2 border-white shadow-sm">
-              <AvatarFallback className="bg-primary text-white">
-                {user?.displayName?.[0] || 'U'}
-              </AvatarFallback>
+            <Avatar className="w-12 h-12 ring-2 ring-primary/20">
+              <AvatarFallback className="bg-primary text-white font-bold">{user?.displayName?.[0]}</AvatarFallback>
             </Avatar>
             <div>
               <h1 className="font-bold text-lg leading-tight">{user?.displayName}</h1>
-              <p className="text-[10px] text-muted-foreground uppercase font-bold tracking-wider">
-                {user?.brandName} • {user?.division} • {user?.roleLabel}
-              </p>
+              <p className="text-[10px] text-muted-foreground uppercase font-black tracking-widest">{user?.brandName} • {user?.division}</p>
             </div>
           </div>
           <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="rounded-full">
@@ -336,191 +308,134 @@ export default function AbsenPage() {
           </Button>
         </div>
 
-        <div className="bg-muted/50 p-3 rounded-xl flex items-center justify-between mb-6 border border-white/20">
-          <p className="text-[11px] text-muted-foreground italic">
-            Login: <span className="font-bold text-primary">{user?.displayName}</span>
-          </p>
-          <Badge variant="outline" className="text-[8px] bg-white">ABSENSI PRIBADI</Badge>
-        </div>
-
-        {configError ? (
-          <Card className="border-none shadow-xl bg-white p-8 text-center rounded-3xl">
-            <AlertCircle className="w-12 h-12 text-destructive mx-auto mb-4" />
-            <h2 className="font-bold mb-2">Masalah Konfigurasi</h2>
-            <p className="text-sm text-muted-foreground mb-6">{configError}</p>
-            <Button onClick={() => window.location.reload()} className="w-full rounded-2xl">
-              <RefreshCw className="w-4 h-4 mr-2" /> Muat Ulang
-            </Button>
-          </Card>
-        ) : (
-          <div className="space-y-6">
-            <Card className="border-none shadow-2xl rounded-[2.5rem] bg-white overflow-hidden">
-              <CardContent className="pt-8 pb-10 flex flex-col items-center text-center">
-                <div className="mb-8 flex flex-wrap justify-center gap-2">
-                  {location ? (
-                    <>
-                      {location.accuracy > 80 ? (
-                        <Badge variant="outline" className="px-5 py-2 rounded-full text-orange-500 border-orange-200 gap-2">
-                          <AlertTriangle className="w-4 h-4" /> SINYAL GPS LEMAH
-                        </Badge>
-                      ) : (
-                        <Badge variant={zone === 'onsite' ? 'default' : 'secondary'} className="px-5 py-2 rounded-full gap-2">
-                          {zone === 'onsite' ? <CheckCircle2 className="w-4 h-4" /> : <MapPin className="w-4 h-4" />}
-                          ZONA {zone.toUpperCase()}
-                        </Badge>
-                      )}
-                    </>
-                  ) : (
-                    <Badge variant="outline" className="animate-pulse px-5 py-2 rounded-full">
-                      MENCARI LOKASI...
-                    </Badge>
-                  )}
-                </div>
-
-                <button
-                  onClick={() => handleTap()}
-                  disabled={!location || submitting || isFinished}
-                  className={`
-                    relative w-48 h-48 rounded-full flex flex-col items-center justify-center gap-1 shadow-2xl transition-all active:scale-95
-                    ${nextAction === 'tap_in' ? 'bg-primary text-white' : 'bg-secondary text-white'}
-                    ${(isFinished) ? 'bg-gray-200 text-gray-500' : ''}
-                    ${(!location || submitting) ? 'opacity-50 grayscale' : ''}
-                  `}
-                >
-                  {submitting ? (
-                    <Loader2 className="w-12 h-12 animate-spin" />
-                  ) : (
-                    <>
-                      <span className="text-3xl font-black uppercase tracking-tighter">
-                        {isFinished ? 'SELESAI' : `TAP ${nextAction.replace('_',' ').toUpperCase()}`}
-                      </span>
-                      <span className="text-[10px] font-bold opacity-80">
-                        {isFinished ? 'Sampai Jumpa Besok!' : 'Tekan Sekali'}
-                      </span>
-                    </>
-                  )}
-                </button>
-
-                <div className="mt-8 w-full grid grid-cols-2 gap-4">
-                  <div className="p-4 bg-muted/40 rounded-3xl border border-white text-left">
-                    <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Status Lokasi</p>
-                    <p className="font-bold text-sm truncate">
-                      {zone === 'onsite' ? 'Dalam Kantor' : zone === 'offsite' ? 'Luar Kantor' : 'Mencari...'}
-                    </p>
-                  </div>
-                  <div className="p-4 bg-muted/40 rounded-3xl border border-white text-left">
-                    <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Akurasi GPS</p>
-                    <p className="font-bold text-sm flex items-center justify-between gap-2">
-                      {location ? `±${location.accuracy.toFixed(0)}m` : '--'}
-                      <button onClick={refreshLocation} className="p-1 hover:bg-white/50 rounded-full transition-colors">
-                        <RefreshCw className="w-3 h-3 text-primary" />
-                      </button>
-                    </p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <div className="bg-primary/5 p-4 rounded-2xl flex items-start gap-3 border border-primary/10">
-              <Info className="w-5 h-5 text-primary shrink-0" />
-              <div className="text-[11px] text-muted-foreground leading-relaxed">
-                <p>Radius Area Kantor: <span className="font-bold">{config?.office?.radiusM || 150}m</span>.</p>
-                <p className="font-bold text-primary underline">Wajib foto jika di luar area atau sinyal GPS lemah ({'>'}80m).</p>
-              </div>
-            </div>
-
-            <div className="space-y-4 pb-10">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <History className="w-4 h-4 text-muted-foreground" />
-                  <h2 className="text-sm font-bold uppercase tracking-widest text-muted-foreground">Riwayat Hari Ini</h2>
-                </div>
-              </div>
-              
-              <div className="space-y-3">
-                {eventsLoading ? (
-                  <div className="text-center p-8">
-                    <Loader2 className="w-6 h-6 animate-spin mx-auto text-muted-foreground" />
-                    <p className="text-[10px] mt-2 text-muted-foreground">Memuat data...</p>
-                  </div>
-                ) : historyError ? (
-                  <div className="text-center p-8 bg-red-50 rounded-2xl border border-red-100">
-                    <AlertCircle className="w-6 h-6 text-red-500 mx-auto mb-2" />
-                    <p className="text-xs text-red-600 font-medium">Gagal memuat riwayat.</p>
-                  </div>
-                ) : sortedEvents?.map((ev: any, i: number) => {
-                  const eventDate = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
-                  const isToday = format(eventDate, 'yyyy-MM-dd') === format(new Date(), 'yyyy-MM-dd');
-                  
-                  if (!isToday) return null;
-
-                  const flags = ev.flags || [];
-                  let isLate = flags.includes('TERLAMBAT');
-                  let isEarly = flags.includes('PULANG_CEPAT');
-                  let isOT = flags.includes('LEMBUR');
-
-                  // Deteksi dinamis berdasarkan config shift saat ini agar konsisten
-                  if (config?.shift) {
-                    const [h, m] = config.shift.startTime.split(':').map(Number);
-                    const [eh, em] = config.shift.endTime.split(':').map(Number);
-                    const grace = parseInt(config.shift.graceLateMinutes || "0");
-                    const currentMinutes = eventDate.getHours() * 60 + eventDate.getMinutes();
-                    
-                    if (ev.type === 'tap_in') {
-                      const limitMinutes = h * 60 + m + grace;
-                      if (currentMinutes > limitMinutes) isLate = true;
-                    } else if (ev.type === 'tap_out') {
-                      const endMinutes = eh * 60 + em;
-                      if (currentMinutes < endMinutes) isEarly = true;
-                      if (currentMinutes > endMinutes) isOT = true;
-                    }
-                  }
-
-                  return (
-                    <div key={i} className="bg-white p-4 rounded-2xl border border-white shadow-sm flex justify-between items-center transition-all hover:shadow-md">
-                      <div className="flex items-center gap-4">
-                        <div className={`p-2 rounded-xl ${ev.type === 'tap_in' ? 'bg-primary/10 text-primary' : 'bg-secondary/10 text-secondary'}`}>
-                          <Clock className="w-5 h-5" />
-                        </div>
-                        <div>
-                          <p className="font-bold text-sm uppercase">TAP {ev.type === 'tap_in' ? 'MASUK' : 'KELUAR'}</p>
-                          <div className="flex flex-wrap gap-1 mt-1">
-                            {isLate && <Badge variant="destructive" className="text-[8px] h-4">TERLAMBAT</Badge>}
-                            {isEarly && <Badge variant="secondary" className="text-[8px] h-4 bg-orange-500 text-white border-none">PULANG CEPAT</Badge>}
-                            {isOT && <Badge variant="default" className="text-[8px] h-4 bg-green-600 border-none">LEMBUR</Badge>}
-                            {!isLate && !isEarly && !isOT && <Badge variant="outline" className="text-[8px] h-4 border-green-200 text-green-600">TEPAT WAKTU</Badge>}
-                          </div>
-                        </div>
-                      </div>
-                      <div className="text-right flex flex-col items-end gap-1">
-                        <p className="font-black text-lg">
-                          {format(eventDate, 'HH:mm')}
-                        </p>
-                        <div className="flex gap-1">
-                          <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.isOnsite ? 'bg-green-50 text-green-700' : 'bg-orange-50 text-orange-700'}`}>
-                            {ev.mode}
-                          </Badge>
-                          {ev.photoUrl && <Camera className="w-3 h-3 text-muted-foreground" />}
-                        </div>
-                      </div>
-                    </div>
-                  );
-                })}
-                {todayStatus.events.length === 0 && !eventsLoading && !historyError && (
-                  <div className="text-center p-8 border-2 border-dashed rounded-3xl opacity-50">
-                    <History className="w-8 h-8 mx-auto mb-2 text-muted-foreground" />
-                    <p className="text-sm italic">Belum ada riwayat hari ini.</p>
-                  </div>
+        {/* Site Status */}
+        <Card className="mb-6 border-none shadow-xl rounded-[2rem] overflow-hidden bg-white">
+          <CardContent className="pt-6">
+            <div className="flex flex-col items-center text-center gap-4">
+              <div className="flex flex-wrap justify-center gap-2">
+                {activeSite ? (
+                  <Badge variant={isInsideRadius ? 'default' : 'secondary'} className="rounded-full px-4 py-1 gap-2">
+                    <Navigation className="w-3 h-3" /> {activeSite.name}
+                  </Badge>
+                ) : (
+                  <Badge variant="outline" className="rounded-full animate-pulse">MENCARI LOKASI...</Badge>
+                )}
+                {isInsideRadius ? (
+                  <Badge className="bg-green-600 text-white border-none rounded-full px-4 py-1 gap-2">
+                    <CheckCircle2 className="w-3 h-3" /> DALAM KANTOR
+                  </Badge>
+                ) : (
+                  <Badge variant="destructive" className="rounded-full px-4 py-1 gap-2">
+                    <AlertTriangle className="w-3 h-3" /> ZONA OFFSITE
+                  </Badge>
                 )}
               </div>
+
+              <div className="grid grid-cols-2 w-full gap-4 mt-2">
+                <div className="p-3 bg-muted/40 rounded-2xl">
+                  <p className="text-[9px] font-bold text-muted-foreground uppercase">Jarak</p>
+                  <p className="text-sm font-black">{distance ? `${Math.round(distance)}m` : '--'}</p>
+                  <p className="text-[8px] opacity-60">Radius: {activeSite?.radiusM}m</p>
+                </div>
+                <div className="p-3 bg-muted/40 rounded-2xl">
+                  <p className="text-[9px] font-bold text-muted-foreground uppercase">Akurasi GPS</p>
+                  <p className={`text-sm font-black ${!isAccuracyOk ? 'text-destructive' : ''}`}>
+                    ±{location?.accuracy.toFixed(0)}m
+                  </p>
+                  {activeSite?.minGpsAccuracyM && (
+                    <p className="text-[8px] opacity-60">Batas: ≤{activeSite.minGpsAccuracyM}m</p>
+                  )}
+                </div>
+              </div>
             </div>
+          </CardContent>
+        </Card>
+
+        {/* Main Action */}
+        <div className="flex flex-col items-center gap-8 my-8">
+          <button
+            onClick={() => handleTap('normal')}
+            disabled={!canTapNormal || submitting || isFinished}
+            className={`
+              relative w-48 h-48 rounded-full flex flex-col items-center justify-center gap-2 shadow-2xl transition-all active:scale-95
+              ${nextAction === 'IN' ? 'bg-primary text-white' : 'bg-secondary text-white'}
+              ${(isFinished || !canTapNormal) ? 'opacity-50 grayscale' : ''}
+              ${submitting ? 'animate-pulse' : ''}
+            `}
+          >
+            {submitting ? <Loader2 className="w-12 h-12 animate-spin" /> : (
+              <>
+                <Clock className="w-10 h-10 mb-1" />
+                <span className="text-2xl font-black uppercase tracking-tighter">TAP {nextAction}</span>
+                <span className="text-[10px] font-bold opacity-70">Klik di Sini</span>
+              </>
+            )}
+          </button>
+
+          {!canTapNormal && !isFinished && (
+            <div className="text-center animate-in fade-in slide-in-from-bottom-2">
+              <p className="text-xs text-muted-foreground font-medium mb-4 italic">
+                {!isInsideRadius ? "Anda berada di luar area kantor." : "Sinyal GPS Anda belum akurat."}
+              </p>
+              <Button 
+                onClick={() => setShowCamera(true)} 
+                variant="outline" 
+                className="rounded-full px-8 py-6 h-auto border-primary/20 bg-primary/5 hover:bg-primary/10 gap-3"
+              >
+                <Camera className="w-5 h-5 text-primary" />
+                <div className="text-left">
+                  <p className="text-xs font-bold leading-none mb-0.5">ABSEN FOTO</p>
+                  <p className="text-[9px] text-muted-foreground uppercase font-black tracking-widest opacity-60">Dinas / Offsite</p>
+                </div>
+              </Button>
+            </div>
+          )}
+
+          {isFinished && (
+            <Badge variant="outline" className="py-2 px-6 rounded-full border-green-200 bg-green-50 text-green-700 font-bold">
+              ABSENSI HARI INI SELESAI
+            </Badge>
+          )}
+        </div>
+
+        {/* History */}
+        <div className="space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <History className="w-4 h-4 text-muted-foreground" />
+            <h2 className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Riwayat Terbaru</h2>
           </div>
-        )}
+          <div className="space-y-3">
+            {eventsLoading ? <Loader2 className="w-6 h-6 animate-spin mx-auto opacity-20" /> : 
+             rawEvents?.map((ev: any, i: number) => {
+               const dt = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
+               return (
+                 <div key={i} className="bg-white p-4 rounded-3xl border border-muted/20 shadow-sm flex justify-between items-center">
+                   <div className="flex gap-4">
+                     <div className={`p-2.5 rounded-2xl ${ev.type === 'IN' ? 'bg-primary/10 text-primary' : 'bg-secondary/10 text-secondary'}`}>
+                       <Clock className="w-5 h-5" />
+                     </div>
+                     <div>
+                       <p className="text-xs font-black uppercase tracking-tight">TAP {ev.type}</p>
+                       <p className="text-[10px] text-muted-foreground font-medium line-clamp-1 max-w-[150px]">{ev.address || ev.siteName}</p>
+                     </div>
+                   </div>
+                   <div className="text-right">
+                     <p className="text-sm font-black">{format(dt, 'HH:mm')}</p>
+                     <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.mode === 'photo' ? 'bg-orange-50 text-orange-600' : 'bg-green-50 text-green-600'}`}>
+                       {ev.mode === 'photo' ? 'PHOTO' : 'NORMAL'}
+                     </Badge>
+                   </div>
+                 </div>
+               );
+             })
+            }
+          </div>
+        </div>
       </div>
 
       {showCamera && (
         <CameraCapture
-          onCapture={(base64) => handleTap(base64)}
+          onCapture={(base64) => handleTap('photo', base64)}
           onCancel={() => setShowCamera(false)}
         />
       )}

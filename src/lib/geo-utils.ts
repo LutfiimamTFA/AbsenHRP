@@ -13,3 +13,19 @@ export function getDistance(lat1: number, lon1: number, lat2: number, lon2: numb
 
   return R * c; // in metres
 }
+
+export async function getAddressFromLatLng(lat: number, lng: number): Promise<string> {
+  try {
+    const response = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lng}&zoom=18&addressdetails=1`, {
+      headers: { 'Accept-Language': 'id-ID' }
+    });
+    const data = await response.json();
+    if (data && data.display_name) {
+      return data.display_name;
+    }
+    return "Alamat tidak ditemukan";
+  } catch (error) {
+    console.error("Geocoding error:", error);
+    return `${lat.toFixed(6)}, ${lng.toFixed(6)}`;
+  }
+}

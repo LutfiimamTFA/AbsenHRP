@@ -1,75 +1,48 @@
+
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
     
-    // Helper functions
     function isSignedIn() {
       return request.auth != null;
     }
     
-    function isHrd() {
-      return isSignedIn() && exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid));
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // Role markers (Managed via Admin/HRP)
+    match /roles_admin/{uid} { allow read: if isSignedIn(); }
+    match /roles_hrd/{uid} { allow read: if isSignedIn(); }
+
+    // Users & Profiles
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(uid);
     }
     
-    function isSuperAdmin() {
-      return isSignedIn() && exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid));
+    match /profiles/{uid} {
+      allow read: if isSignedIn();
+      allow write: if isOwner(uid);
     }
 
-    // Recruitment Rules (Preserved)
-    match /jobs/{jobId} {
-      allow read: if true;
-      allow write: if isHrd() || isSuperAdmin();
-    }
-    match /applications/{appId} {
-      allow create: if true;
-      allow read, update: if isHrd() || isSuperAdmin() || (isSignedIn() && resource.data.userId == request.auth.uid);
-    }
-    match /assessments/{assessmentId} {
-      allow read, write: if isHrd() || isSuperAdmin();
+    // Attendance Configuration (Sites Gedung A/B)
+    match /attendance_sites/{siteId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && (exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) || exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)));
     }
 
-    // ====== ABSENSI CONFIG (Pusat) ======
-    match /attendance_config/{configId} {
-      allow get: if isSignedIn(); // konfigurasi kantor dibaca semua user yang login
-      allow list: if false;
-      allow create, update, delete: if isHrd() || isSuperAdmin();
-    }
-
-    // Profil User
-    match /users/{uid} {
-      allow read: if isSignedIn() && (request.auth.uid == uid || isHrd() || isSuperAdmin());
-      allow write: if isSignedIn() && request.auth.uid == uid;
-    }
-
-    // Role Markers (Private)
-    match /roles_admin/{uid} { allow read, write: if false; }
-    match /roles_hrd/{uid} { allow read, write: if false; }
-    match /roles_manager/{uid} { allow read, write: if false; }
-
-    // ====== EVENT ABSENSI (Riwayat) ======
+    // Attendance Events
     match /attendance_events/{eventId} {
-      // Izinkan pencarian riwayat milik sendiri
-      allow list: if isSignedIn();
-      
-      // Akses detail dokumen
-      allow get: if isSignedIn() && (isHrd() || isSuperAdmin() || resource.data.uid == request.auth.uid);
-      
-      // User boleh membuat absen miliknya sendiri
-      allow create: if isSignedIn() 
-        && request.resource.data.uid == request.auth.uid
-        && request.resource.data.type in ['tap_in', 'tap_out']
-        && request.resource.data.tsClient is timestamp
-        && (!('accuracyM' in request.resource.data) || request.resource.data.accuracyM is number)
-        && (!('distanceM' in request.resource.data) || request.resource.data.distanceM is number)
-        && (!('isOnsite' in request.resource.data) || request.resource.data.isOnsite is bool);
-        
+      allow list: if isSignedIn() && (resource == null || resource.data.uid == request.auth.uid);
+      allow get: if isSignedIn() && (resource.data.uid == request.auth.uid || exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)));
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
       allow update, delete: if false;
     }
 
-    // Work Locations (Legacy support)
-    match /work_locations/{id} {
+    // Brands (Support for useUser hook)
+    match /brands/{brandId} {
       allow read: if isSignedIn();
-      allow write: if isHrd() || isSuperAdmin();
     }
   }
 }
