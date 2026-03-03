@@ -66,15 +66,12 @@ export default function AbsenPage() {
   useEffect(() => {
     const loadSites = async () => {
       if (!user?.brandId) {
-        console.warn("[SITE RESOLVER] brandId user kosong. User:", user?.displayName);
         setLoadingSites(false);
         return;
       }
       
       setLoadingSites(true);
       try {
-        console.log("[SITE RESOLVER] Mencari site untuk brandId:", user.brandId);
-        
         const q = query(
           collection(db, 'attendance_sites'),
           where('isActive', '==', true)
@@ -88,10 +85,9 @@ export default function AbsenPage() {
           return s.brandIds.includes(user.brandId);
         });
 
-        console.log("[SITE RESOLVER] Kandidat Site Terfilter:", brandSites.map(s => `${s.id} (${s.name})`));
         setSites(brandSites);
       } catch (err: any) {
-        console.error("[SITE ERROR] Gagal load sites:", err.message);
+        console.error("[SITE ERROR]", err.message);
       } finally {
         setLoadingSites(false);
       }
@@ -116,7 +112,7 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // 4. Site Selection (Nearest dari kandidat yang sudah terfilter brand)
+  // 4. Site Selection (Nearest)
   useEffect(() => {
     if (location && sites.length > 0) {
       let closest = null;
@@ -185,6 +181,34 @@ export default function AbsenPage() {
 
   const canTapNormal = isInsideRadius && isAccuracyOk && activeSite;
 
+  const calculateStatus = (type: 'IN' | 'OUT', now: Date, site: any) => {
+    if (!site?.shift) return { status: 'NORMAL', lateMinutes: 0 };
+
+    const { startTime, endTime, graceLateMinutes } = site.shift;
+    const [startH, startM] = startTime.split(':').map(Number);
+    const [endH, endM] = endTime.split(':').map(Number);
+
+    const scheduledStart = new Date(now);
+    scheduledStart.setHours(startH, startM, 0, 0);
+
+    const scheduledEnd = new Date(now);
+    scheduledEnd.setHours(endH, endM, 0, 0);
+
+    if (type === 'IN') {
+      const graceEnd = new Date(scheduledStart.getTime() + (graceLateMinutes || 0) * 60000);
+      if (now > graceEnd) {
+        const diff = Math.ceil((now.getTime() - scheduledStart.getTime()) / 60000);
+        return { status: 'LATE', lateMinutes: diff };
+      }
+      return { status: 'ON_TIME', lateMinutes: 0 };
+    } else {
+      if (now < scheduledEnd) {
+        return { status: 'EARLY_LEAVE', lateMinutes: 0 };
+      }
+      return { status: 'ON_TIME', lateMinutes: 0 };
+    }
+  };
+
   const applyWatermark = async (base64: string, address: string, statusText: string): Promise<string> => {
     return new Promise((resolve) => {
       const img = new Image();
@@ -243,6 +267,7 @@ export default function AbsenPage() {
     try {
       const now = new Date();
       const address = await getAddressFromLatLng(location.lat, location.lng);
+      const { status, lateMinutes } = calculateStatus(nextAction, now, activeSite);
       
       let photoUrl = null;
       if (mode === 'photo' && photoBase64) {
@@ -269,10 +294,14 @@ export default function AbsenPage() {
         distanceM: Math.round(distance || 0),
         address,
         photoUrl,
+        status,
+        lateMinutes,
+        shiftSnapshot: activeSite?.shift || null,
         flags: !isInsideRadius ? ['OFFSITE'] : []
       });
 
-      toast({ title: 'Sukses!', description: `Absen ${nextAction} berhasil dicatat.` });
+      const message = status === 'LATE' ? `Absen berhasil. Terlambat ${lateMinutes} menit.` : `Absen ${nextAction} berhasil dicatat.`;
+      toast({ title: 'Sukses!', description: message });
       setShowCamera(false);
     } catch (err: any) {
       toast({ variant: 'destructive', title: 'Gagal', description: err.message });
@@ -420,9 +449,14 @@ export default function AbsenPage() {
                        </div>
                        <div className="text-right">
                          <p className="text-sm font-black">{format(dt, 'HH:mm')}</p>
-                         <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.mode === 'photo' ? 'bg-orange-50 text-orange-600' : 'bg-green-50 text-green-600'}`}>
-                           {ev.mode === 'photo' ? 'OFFSITE' : 'ONSITE'}
-                         </Badge>
+                         <div className="flex flex-col items-end gap-1">
+                           <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.status === 'LATE' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
+                             {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : (ev.status === 'ON_TIME' ? 'TEPAT WAKTU' : 'NORMAL')}
+                           </Badge>
+                           <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.mode === 'photo' ? 'bg-orange-50 text-orange-600' : 'bg-green-50 text-green-600'}`}>
+                             {ev.mode === 'photo' ? 'OFFSITE' : 'ONSITE'}
+                           </Badge>
+                         </div>
                        </div>
                      </div>
                    );
@@ -446,9 +480,14 @@ export default function AbsenPage() {
                           <p className="text-[10px] font-bold text-muted-foreground mb-0.5">{format(dt, 'EEEE, dd MMM yyyy', { locale: localeId })}</p>
                           <p className="text-xs font-black uppercase tracking-tight">TAP {ev.type} • {ev.siteName}</p>
                         </div>
-                        <Badge variant="outline" className="text-[9px] rounded-full px-3">
-                          {ev.mode?.toUpperCase() || 'NORMAL'}
-                        </Badge>
+                        <div className="flex flex-col items-end gap-1">
+                          <Badge variant="outline" className={`text-[9px] rounded-full px-3 ${ev.status === 'LATE' ? 'border-red-200 text-red-600 bg-red-50' : 'border-green-200 text-green-600 bg-green-50'}`}>
+                            {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : (ev.status === 'ON_TIME' ? 'TEPAT WAKTU' : 'NORMAL')}
+                          </Badge>
+                          <Badge variant="outline" className="text-[9px] rounded-full px-3">
+                            {ev.mode?.toUpperCase() || 'NORMAL'}
+                          </Badge>
+                        </div>
                       </div>
                       <div className="flex items-start gap-2 mt-2">
                         <MapPin className="w-3 h-3 text-muted-foreground mt-0.5 shrink-0" />
