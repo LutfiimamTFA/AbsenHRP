@@ -1,42 +1,31 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    
     function isSignedIn() {
       return request.auth != null;
     }
     
-    function isOwner(uid) {
-      return isSignedIn() && request.auth.uid == uid;
+    match /users/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if isSignedIn() && request.auth.uid == uid;
     }
-
-    // Site Configurations (Gedung A/B)
+    
     match /attendance_sites/{siteId} {
       allow read: if isSignedIn();
     }
-
-    // User Profiles & Brands
-    match /users/{uid} {
-      allow read: if isSignedIn();
-      allow write: if isOwner(uid);
-    }
     
+    match /attendance_events/{eventId} {
+      allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+      allow list: if isSignedIn() && request.query.limit <= 50;
+    }
+
     match /profiles/{uid} {
       allow read: if isSignedIn();
-      allow write: if isOwner(uid);
     }
-
+    
     match /brands/{brandId} {
       allow read: if isSignedIn();
-    }
-
-    // Attendance Events
-    match /attendance_events/{eventId} {
-      // Izinkan list jika query menyertakan filter uid milik sendiri
-      allow list: if isSignedIn() && (request.query.limit <= 100);
-      allow get: if isSignedIn() && (resource.data.uid == request.auth.uid);
-      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
-      allow update, delete: if false;
     }
   }
 }
