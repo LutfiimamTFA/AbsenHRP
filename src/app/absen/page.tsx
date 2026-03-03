@@ -65,22 +65,39 @@ export default function AbsenPage() {
   // 2. Multi-Site Loading (Dynamic from attendance_sites)
   useEffect(() => {
     const loadSites = async () => {
-      if (!user?.brandId) return;
+      if (!user?.brandId) {
+        console.warn("[SITE RESOLVER] brandId user kosong. User:", user?.displayName);
+        setLoadingSites(false);
+        return;
+      }
+      
       setLoadingSites(true);
       try {
+        console.log("[SITE RESOLVER] Mencari site untuk userBrandId:", user.brandId);
+        
         const q = query(
           collection(db, 'attendance_sites'),
           where('isActive', '==', true)
         );
         const snap = await getDocs(q);
         const allSites = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
-        // Filter by brandIds (client side to avoid complex indexes)
-        const brandSites = allSites.filter((s: any) => 
-          s.brandIds && s.brandIds.includes(user.brandId)
-        );
+        
+        // Filter ketat berdasarkan brandId user (mendukung string atau array)
+        const brandSites = allSites.filter((s: any) => {
+          if (!s.brandIds || !Array.isArray(s.brandIds)) return false;
+          
+          if (Array.isArray(user.brandId)) {
+            // User multi-brand (array) -> site harus punya salah satu brand user
+            return s.brandIds.some(bid => user.brandId.includes(bid));
+          }
+          // User single brand (string)
+          return s.brandIds.includes(user.brandId);
+        });
+
+        console.log("[SITE RESOLVER] Kandidat Site Terfilter:", brandSites.map(s => `${s.id} (${s.name})`));
         setSites(brandSites);
       } catch (err: any) {
-        console.error("Error loading sites:", err);
+        console.error("[SITE ERROR] Gagal load sites:", err.message);
       } finally {
         setLoadingSites(false);
       }
@@ -105,7 +122,7 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // 4. Site Selection (Nearest Gedung A/B)
+  // 4. Site Selection (Nearest Gedung A/B dari kandidat yang sudah terfilter)
   useEffect(() => {
     if (location && sites.length > 0) {
       let closest = null;
@@ -119,6 +136,9 @@ export default function AbsenPage() {
       });
       setActiveSite(closest);
       setDistance(minD);
+    } else if (sites.length === 0) {
+      setActiveSite(null);
+      setDistance(null);
     }
   }, [location, sites]);
 
@@ -169,9 +189,8 @@ export default function AbsenPage() {
     return required ? location.accuracy <= required : true;
   }, [location, activeSite]);
 
-  const canTapNormal = isInsideRadius && isAccuracyOk;
+  const canTapNormal = isInsideRadius && isAccuracyOk && activeSite;
 
-  // 6. Watermarking (Bottom Aligned, No Lat/Lng)
   const applyWatermark = async (base64: string, address: string, statusText: string): Promise<string> => {
     return new Promise((resolve) => {
       const img = new Image();
@@ -297,6 +316,17 @@ export default function AbsenPage() {
           </TabsList>
 
           <TabsContent value="absen" className="p-4 space-y-6">
+            {!loadingSites && sites.length === 0 && (
+              <Card className="border-destructive/50 bg-destructive/5">
+                <CardContent className="pt-6 flex items-center gap-3 text-destructive">
+                  <AlertTriangle className="w-5 h-5 shrink-0" />
+                  <p className="text-xs font-bold uppercase tracking-tight">
+                    Brand kamu belum punya site absensi. Hubungi HRD.
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+
             <Card className="border-none shadow-sm rounded-3xl overflow-hidden bg-white">
               <CardContent className="pt-6 space-y-4">
                 <div className="flex justify-center gap-2">
@@ -351,7 +381,7 @@ export default function AbsenPage() {
                 )}
               </button>
 
-              {!canTapNormal && !isFinished && (
+              {(!canTapNormal && !isFinished && sites.length > 0) && (
                 <div className="text-center px-4 space-y-4 animate-in fade-in slide-in-from-bottom-2">
                   <p className="text-xs text-muted-foreground font-medium italic">
                     Anda berada di luar radius atau GPS belum stabil.
