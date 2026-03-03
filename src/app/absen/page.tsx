@@ -12,8 +12,8 @@ import {
   serverTimestamp, 
   Timestamp 
 } from 'firebase/firestore';
-import { getStorage, ref, uploadString, getDownloadURL } from 'firebase/storage';
-import { useAuth, useFirestore, useUser, useCollection } from '@/firebase';
+import { getStorage, ref, uploadBytes, getDownloadURL } from 'firebase/storage';
+import { useAuth, useFirestore, useUser, useCollection, useFirebaseApp } from '@/firebase';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
@@ -40,6 +40,7 @@ export default function AbsenPage() {
   const { user, loading: userLoading } = useUser();
   const auth = useAuth();
   const db = useFirestore();
+  const firebaseApp = useFirebaseApp();
   const router = useRouter();
   const { toast } = useToast();
   
@@ -71,19 +72,18 @@ export default function AbsenPage() {
       
       setLoadingSites(true);
       try {
-        console.log("[DEBUG] Fetching sites for brand:", user.brandId);
+        // Query sites that are active
         const q = query(
           collection(db, 'attendance_sites'),
-          where('isActive', '==', true),
-          where('brandIds', 'array-contains', user.brandId)
+          where('isActive', '==', true)
         );
         const snap = await getDocs(q);
-        // Extra client-side filter for strictness
+        
+        // Filter strictly by user's brandId on client-side for precision
         const brandSites = snap.docs
           .map(doc => ({ id: doc.id, ...doc.data() } as any))
           .filter(site => site.brandIds?.includes(user.brandId));
         
-        console.log("[DEBUG] Found sites:", brandSites.map(s => s.name));
         setSites(brandSites);
       } catch (err: any) {
         console.error("[SITE ERROR]", err.message);
@@ -201,9 +201,10 @@ export default function AbsenPage() {
   };
 
   const applyWatermark = async (base64: string, address: string, statusText: string): Promise<string> => {
-    return new Promise((resolve) => {
+    return new Promise((resolve, reject) => {
       const img = new Image();
       img.src = base64;
+      img.onerror = () => reject(new Error("Failed to load capture for watermarking"));
       img.onload = () => {
         const canvas = document.createElement('canvas');
         canvas.width = img.width;
@@ -224,7 +225,7 @@ export default function AbsenPage() {
         ctx.fillText(format(new Date(), 'dd MMMM yyyy, HH:mm', { locale: localeId }) + ' WIB', p, canvas.height - wmHeight + 125);
         ctx.font = '22px Inter, sans-serif';
         ctx.fillStyle = 'rgba(255,255,255,0.85)';
-        const words = address.split(' ');
+        const words = (address || "").split(' ');
         let line = '';
         let y = canvas.height - wmHeight + 175;
         for(let n = 0; n < words.length; n++) {
@@ -233,6 +234,7 @@ export default function AbsenPage() {
             ctx.fillText(line, p, y);
             line = words[n] + ' ';
             y += 30;
+            if (y > canvas.height - 20) break; // Safety break
           } else { line = test; }
         }
         ctx.fillText(line, p, y);
@@ -243,6 +245,16 @@ export default function AbsenPage() {
         resolve(canvas.toDataURL('image/jpeg', 0.8));
       };
     });
+  };
+
+  const dataURLtoBlob = (dataurl: string) => {
+    const arr = dataurl.split(',');
+    const mime = arr[0].match(/:(.*?);/)![1];
+    const bstr = atob(arr[1]);
+    let n = bstr.length;
+    const u8arr = new Uint8Array(n);
+    while (n--) u8arr[n] = bstr.charCodeAt(n);
+    return new Blob([u8arr], { type: mime });
   };
 
   const handleTap = async (mode: 'normal' | 'photo', photoBase64?: string) => {
@@ -256,10 +268,12 @@ export default function AbsenPage() {
       let photoUrl = null;
       if (mode === 'photo' && photoBase64) {
         const watermarked = await applyWatermark(photoBase64, address, 'OFFSITE/DINAS');
-        const storage = getStorage();
+        const storage = getStorage(firebaseApp);
         const path = `attendance/${user.uid}/${Date.now()}.jpg`;
         const storageRef = ref(storage, path);
-        await uploadString(storageRef, watermarked, 'data_url');
+        
+        const blob = dataURLtoBlob(watermarked);
+        await uploadBytes(storageRef, blob);
         photoUrl = await getDownloadURL(storageRef);
       }
 
@@ -288,7 +302,12 @@ export default function AbsenPage() {
       toast({ title: 'Sukses!', description: message });
       setShowCamera(false);
     } catch (err: any) {
-      toast({ variant: 'destructive', title: 'Gagal', description: err.message });
+      console.error("Attendance Error:", err);
+      toast({ 
+        variant: 'destructive', 
+        title: 'Gagal', 
+        description: err.message || 'Terjadi kesalahan sistem.'
+      });
     } finally {
       setSubmitting(false);
     }
