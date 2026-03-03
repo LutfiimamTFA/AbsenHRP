@@ -62,7 +62,7 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // 2. Multi-Site Loading (Dynamic from attendance_sites)
+  // 2. Multi-Site Loading with Strict Brand Filter
   useEffect(() => {
     const loadSites = async () => {
       if (!user?.brandId) {
@@ -73,7 +73,7 @@ export default function AbsenPage() {
       
       setLoadingSites(true);
       try {
-        console.log("[SITE RESOLVER] Mencari site untuk userBrandId:", user.brandId);
+        console.log("[SITE RESOLVER] Mencari site untuk brandId:", user.brandId);
         
         const q = query(
           collection(db, 'attendance_sites'),
@@ -82,15 +82,9 @@ export default function AbsenPage() {
         const snap = await getDocs(q);
         const allSites = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         
-        // Filter ketat berdasarkan brandId user (mendukung string atau array)
+        // STRICT FILTER: Hanya site yang brandIds-nya mengandung brandId user
         const brandSites = allSites.filter((s: any) => {
           if (!s.brandIds || !Array.isArray(s.brandIds)) return false;
-          
-          if (Array.isArray(user.brandId)) {
-            // User multi-brand (array) -> site harus punya salah satu brand user
-            return s.brandIds.some(bid => user.brandId.includes(bid));
-          }
-          // User single brand (string)
           return s.brandIds.includes(user.brandId);
         });
 
@@ -122,7 +116,7 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // 4. Site Selection (Nearest Gedung A/B dari kandidat yang sudah terfilter)
+  // 4. Site Selection (Nearest dari kandidat yang sudah terfilter brand)
   useEffect(() => {
     if (location && sites.length > 0) {
       let closest = null;

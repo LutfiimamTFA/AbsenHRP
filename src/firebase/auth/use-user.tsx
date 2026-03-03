@@ -1,4 +1,3 @@
-
 'use client';
 
 import { useEffect, useState } from 'react';
@@ -49,7 +48,6 @@ export function useUser() {
         // 1. Resolve Name with Priorities
         let resolvedName = userData?.displayName || userData?.name || userData?.fullName;
         
-        // Fallback to profiles/uid if users/uid is missing it
         if (!resolvedName) {
           const profileDoc = await getDoc(doc(db, 'profiles', firebaseUser.uid));
           if (profileDoc.exists()) {
@@ -62,7 +60,6 @@ export function useUser() {
         }
 
         if (!resolvedName && firebaseUser.email) {
-          // Use part before @ as fallback
           resolvedName = firebaseUser.email.split('@')[0];
         }
 
@@ -86,11 +83,8 @@ export function useUser() {
           }
         }
 
-        // Definisi Peran Internal (Semua staf HRP)
         const internalRoles: UserRole[] = ['superadmin', 'super-admin', 'hrd', 'manager', 'karyawan', 'employee'];
         const isInternal = internalRoles.includes(resolvedRole);
-        
-        // Privilege (HRD/Admin untuk dashboard monitoring jika ada di portal lain)
         const isPrivileged = ['hrd', 'manager', 'superadmin', 'super-admin'].includes(resolvedRole);
 
         setUser({

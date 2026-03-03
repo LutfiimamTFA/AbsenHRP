@@ -20,8 +20,8 @@ export function initializeFirebase(): {
   const firestore = getFirestore(firebaseApp);
   const auth = getAuth(firebaseApp);
 
-  // Debug log to confirm correct project on start
-  if (process.env.NODE_ENV !== 'production') {
+  // Debug log untuk verifikasi projectId saat runtime
+  if (typeof window !== 'undefined') {
     console.log("[Firebase] projectId:", firebaseApp.options.projectId);
   }
 
