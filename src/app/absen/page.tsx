@@ -58,7 +58,7 @@ export default function AbsenPage() {
   
   const deviceId = useDeviceId();
 
-  // Redirect logic
+  // Role Restriction
   useEffect(() => {
     if (!userLoading) {
       if (!user) {
@@ -69,7 +69,7 @@ export default function AbsenPage() {
     }
   }, [user, userLoading, router]);
 
-  // Load Sites
+  // Load Multi-Site Gedung A/B
   useEffect(() => {
     const loadSites = async () => {
       if (!user?.brandId) return;
@@ -84,7 +84,7 @@ export default function AbsenPage() {
         const siteData = snap.docs.map(doc => ({ id: doc.id, ...doc.data() }));
         setSites(siteData);
       } catch (err: any) {
-        console.error("Error loading sites:", err);
+        console.error("Error load sites:", err);
       } finally {
         setLoadingSites(false);
       }
@@ -92,7 +92,7 @@ export default function AbsenPage() {
     loadSites();
   }, [db, user?.brandId]);
 
-  // GPS Tracking
+  // GPS Tracking with High Accuracy
   useEffect(() => {
     if (!navigator.geolocation) return;
     const watchId = navigator.geolocation.watchPosition(
@@ -109,7 +109,7 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(watchId);
   }, []);
 
-  // Proximity Site Selection
+  // Nearest Site Selection (Gedung A/B Selection)
   useEffect(() => {
     if (location && sites.length > 0) {
       let closest = null;
@@ -175,7 +175,6 @@ export default function AbsenPage() {
       const [sh, sm] = shift.startTime.split(':').map(Number);
       const [eh, em] = shift.endTime.split(':').map(Number);
       const grace = shift.graceLateMinutes || 0;
-      
       const currentMinutes = time.getHours() * 60 + time.getMinutes();
       
       if (type === 'IN') {
@@ -191,11 +190,11 @@ export default function AbsenPage() {
           return { status: 'OVERTIME', minutes: currentMinutes - endLimit };
         }
       }
-    } catch (e) { console.error("Shift calc error:", e); }
+    } catch (e) { console.error("Calc error:", e); }
     return { status: 'ON_TIME', minutes: 0 };
   };
 
-  const applyWatermark = async (base64: string, address: string, status: string): Promise<string> => {
+  const applyWatermark = async (base64: string, address: string, statusText: string): Promise<string> => {
     return new Promise((resolve) => {
       const img = new Image();
       img.src = base64;
@@ -208,35 +207,33 @@ export default function AbsenPage() {
 
         ctx.drawImage(img, 0, 0);
         
-        // Watermark Box (Bottom ~20%) - Adjusted to be professional
+        // Professional Watermark Box (Bottom ~20%)
         const wmHeight = canvas.height * 0.22;
-        ctx.fillStyle = 'rgba(0,0,0,0.7)';
+        ctx.fillStyle = 'rgba(0,0,0,0.65)';
         ctx.fillRect(0, canvas.height - wmHeight, canvas.width, wmHeight);
 
         ctx.fillStyle = 'white';
         ctx.textBaseline = 'top';
         const padding = 40;
         
-        // Name (Bold)
-        ctx.font = 'bold 36px Inter, sans-serif';
+        // Name & Brand
+        ctx.font = 'bold 38px Inter, sans-serif';
         ctx.fillText(user?.displayName?.toUpperCase() || 'KARYAWAN', padding, canvas.height - wmHeight + 35);
         
-        // Brand & Info
         ctx.font = '28px Inter, sans-serif';
         ctx.fillText(`${user?.brandName || ''} • ${user?.division || ''}`, padding, canvas.height - wmHeight + 85);
         ctx.fillText(`${format(new Date(), 'dd MMMM yyyy, HH:mm', { locale: localeId })} WIB`, padding, canvas.height - wmHeight + 125);
         
-        // Address (Wrapped)
+        // Address Text (No Lat/Lng as requested)
         ctx.font = '22px Inter, sans-serif';
         ctx.fillStyle = 'rgba(255,255,255,0.9)';
         const maxWidth = canvas.width - (padding * 2);
         const words = address.split(' ');
         let line = '';
-        let y = canvas.height - wmHeight + 170;
+        let y = canvas.height - wmHeight + 175;
         for(let n = 0; n < words.length; n++) {
           let testLine = line + words[n] + ' ';
-          let metrics = ctx.measureText(testLine);
-          if (metrics.width > maxWidth && n > 0) {
+          if (ctx.measureText(testLine).width > maxWidth && n > 0) {
             ctx.fillText(line, padding, y);
             line = words[n] + ' ';
             y += 30;
@@ -246,11 +243,11 @@ export default function AbsenPage() {
         }
         ctx.fillText(line, padding, y);
 
-        // Status Tag (Top Right)
+        // Status Overlay
         ctx.font = 'bold 44px Inter, sans-serif';
         ctx.textAlign = 'right';
-        ctx.fillStyle = 'white';
-        ctx.fillText(status, canvas.width - padding, canvas.height - wmHeight + 35);
+        ctx.fillStyle = '#FB923C'; // Orange for Offsite
+        ctx.fillText(statusText, canvas.width - padding, canvas.height - wmHeight + 35);
         
         resolve(canvas.toDataURL('image/jpeg', 0.8));
       };
@@ -258,12 +255,12 @@ export default function AbsenPage() {
   };
 
   const handleTap = async (mode: 'normal' | 'photo', photoBase64?: string) => {
-    if (!user || !location || !activeSite || submitting || isFinished) return;
+    if (!user || !location || submitting || isFinished) return;
     
     setSubmitting(true);
     try {
       const now = new Date();
-      const { status, minutes } = calculateShiftStatus(nextAction, now, activeSite.shift);
+      const { status, minutes } = calculateShiftStatus(nextAction, now, activeSite?.shift);
       const address = await getAddressFromLatLng(location.lat, location.lng);
       
       let photoUrl = null;
@@ -281,8 +278,8 @@ export default function AbsenPage() {
         uid: user.uid,
         userName: user.displayName,
         brandId: user.brandId,
-        siteId: activeSite.id,
-        siteName: activeSite.name,
+        siteId: activeSite?.id || 'OFFSITE',
+        siteName: activeSite?.name || 'Luar Kantor',
         type: nextAction,
         tsClient: Timestamp.fromDate(now),
         tsServer: serverTimestamp(),
@@ -295,7 +292,6 @@ export default function AbsenPage() {
         minutes,
         photoUrl,
         deviceId: deviceId || 'web',
-        shiftSnapshot: activeSite.shift,
         flags: !isInsideRadius ? ['OFFSITE'] : location.accuracy > 100 ? ['GPS_WEAK'] : []
       });
 
@@ -311,58 +307,43 @@ export default function AbsenPage() {
     }
   };
 
-  const reportStats = useMemo(() => {
-    if (!rawEvents) return { totalDays: 0, lates: 0, offsites: 0 };
-    const uniqueDays = new Set(rawEvents.map((e: any) => {
-      const d = e.tsClient instanceof Timestamp ? e.tsClient.toDate() : new Date(e.tsClient);
-      return format(d, 'yyyy-MM-dd');
-    }));
-    const lates = rawEvents.filter((e: any) => e.type === 'IN' && e.status === 'LATE').length;
-    const offsites = rawEvents.filter((e: any) => !e.insideRadius).length;
-    return { totalDays: uniqueDays.size, lates, offsites };
-  }, [rawEvents]);
-
   if (userLoading || loadingSites) {
     return <div className="min-h-svh flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>;
   }
 
   return (
     <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto relative shadow-2xl">
-      <div className="flex-1 overflow-auto">
-        <Tabs defaultValue="absen" className="w-full">
-          <div className="sticky top-0 z-10 bg-background/80 backdrop-blur-md p-4 pb-0">
-            <div className="flex justify-between items-center mb-4">
-              <div className="flex items-center gap-3">
-                <Avatar className="w-12 h-12 ring-2 ring-primary/10">
-                  <AvatarFallback className="bg-primary text-white font-bold">{user?.displayName?.[0]}</AvatarFallback>
-                </Avatar>
-                <div>
-                  <h1 className="font-bold text-lg leading-tight">{user?.displayName}</h1>
-                  <p className="text-[10px] text-muted-foreground uppercase font-black tracking-widest">{user?.brandName}</p>
-                </div>
-              </div>
-              <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="rounded-full">
-                <LogOut className="w-5 h-5" />
-              </Button>
+      <div className="flex-1 overflow-auto pb-20">
+        <div className="p-4 flex justify-between items-center bg-white/80 backdrop-blur-md sticky top-0 z-10 border-b">
+          <div className="flex items-center gap-3">
+            <Avatar className="w-10 h-10 ring-2 ring-primary/10">
+              <AvatarFallback className="bg-primary text-white font-bold">{user?.displayName?.[0]}</AvatarFallback>
+            </Avatar>
+            <div>
+              <h1 className="font-bold text-sm leading-tight">{user?.displayName}</h1>
+              <p className="text-[9px] text-muted-foreground uppercase font-black tracking-widest">{user?.brandName}</p>
             </div>
-            <TabsList className="grid w-full grid-cols-2 rounded-xl h-12">
-              <TabsTrigger value="absen" className="rounded-lg gap-2"><MapPinned className="w-4 h-4" /> Absensi</TabsTrigger>
-              <TabsTrigger value="laporan" className="rounded-lg gap-2"><FileText className="w-4 h-4" /> Laporan</TabsTrigger>
-            </TabsList>
           </div>
+          <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="rounded-full">
+            <LogOut className="w-5 h-5" />
+          </Button>
+        </div>
 
-          <TabsContent value="absen" className="p-4 pt-2">
-            {/* Site Status */}
-            <Card className="mb-6 border-none shadow-md rounded-[2rem] bg-white overflow-hidden">
+        <Tabs defaultValue="absen" className="w-full">
+          <TabsList className="grid w-full grid-cols-2 rounded-none h-12 border-b bg-muted/20">
+            <TabsTrigger value="absen" className="gap-2"><Navigation className="w-4 h-4" /> Absensi</TabsTrigger>
+            <TabsTrigger value="history" className="gap-2"><FileText className="w-4 h-4" /> Riwayat</TabsTrigger>
+          </TabsList>
+
+          <TabsContent value="absen" className="p-4 space-y-6">
+            <Card className="border-none shadow-sm rounded-3xl overflow-hidden bg-gradient-to-br from-white to-muted/30">
               <CardContent className="pt-6">
-                <div className="flex flex-col items-center text-center gap-4">
+                <div className="flex flex-col items-center gap-4">
                   <div className="flex flex-wrap justify-center gap-2">
-                    {activeSite ? (
-                      <Badge variant={isInsideRadius ? 'default' : 'secondary'} className="rounded-full px-4 py-1 gap-2">
-                        <Navigation className="w-3 h-3" /> {activeSite.name}
+                    {activeSite && (
+                      <Badge variant="outline" className="rounded-full px-3 py-1 gap-1.5 border-primary/20">
+                        <Navigation className="w-3 h-3 text-primary" /> {activeSite.name}
                       </Badge>
-                    ) : (
-                      <Badge variant="outline" className="rounded-full animate-pulse">MENCARI SITE...</Badge>
                     )}
                     {isInsideRadius ? (
                       <Badge className="bg-green-600 text-white border-none rounded-full px-4 py-1 gap-2">
@@ -375,13 +356,13 @@ export default function AbsenPage() {
                     )}
                   </div>
 
-                  <div className="grid grid-cols-2 w-full gap-3 mt-1">
-                    <div className="p-3 bg-muted/40 rounded-2xl">
+                  <div className="grid grid-cols-2 w-full gap-3">
+                    <div className="p-3 bg-white rounded-2xl border">
                       <p className="text-[9px] font-bold text-muted-foreground uppercase">Jarak Anda</p>
                       <p className="text-sm font-black">{distance !== null ? `${Math.round(distance)}m` : '--'}</p>
-                      <p className="text-[8px] opacity-60">Radius: {activeSite?.radiusM}m</p>
+                      <p className="text-[8px] opacity-60">Radius: {activeSite?.radiusM || 150}m</p>
                     </div>
-                    <div className="p-3 bg-muted/40 rounded-2xl">
+                    <div className="p-3 bg-white rounded-2xl border">
                       <p className="text-[9px] font-bold text-muted-foreground uppercase">Akurasi GPS</p>
                       <p className={`text-sm font-black ${!isAccuracyOk ? 'text-destructive' : ''}`}>
                         ±{location?.accuracy.toFixed(0)}m
@@ -395,15 +376,14 @@ export default function AbsenPage() {
               </CardContent>
             </Card>
 
-            {/* Main Action */}
-            <div className="flex flex-col items-center gap-8 my-8">
+            <div className="flex flex-col items-center gap-8 py-4">
               <button
                 onClick={() => handleTap('normal')}
                 disabled={!canTapNormal || submitting || isFinished}
                 className={`
                   relative w-44 h-44 rounded-full flex flex-col items-center justify-center gap-2 shadow-2xl transition-all active:scale-95
                   ${nextAction === 'IN' ? 'bg-primary text-white' : 'bg-secondary text-white'}
-                  ${(isFinished || !canTapNormal) ? 'opacity-50 grayscale' : ''}
+                  ${(isFinished || !canTapNormal) ? 'opacity-30 grayscale cursor-not-allowed' : 'hover:scale-105'}
                   ${submitting ? 'animate-pulse' : ''}
                 `}
               >
@@ -417,9 +397,9 @@ export default function AbsenPage() {
               </button>
 
               {!canTapNormal && !isFinished && (
-                <div className="text-center animate-in fade-in slide-in-from-bottom-2 px-4">
+                <div className="text-center px-4 animate-in fade-in slide-in-from-bottom-2">
                   <p className="text-xs text-muted-foreground font-medium mb-4 italic leading-relaxed">
-                    {!isInsideRadius ? "Sistem mendeteksi Anda berada di luar radius kantor." : "Akurasi GPS perangkat Anda belum stabil."}
+                    Sistem mendeteksi Anda berada di luar radius kantor atau GPS belum stabil.
                   </p>
                   <Button 
                     onClick={() => setShowCamera(true)} 
@@ -442,26 +422,22 @@ export default function AbsenPage() {
               )}
             </div>
 
-            {/* Recent History */}
-            <div className="mt-4 pb-20">
-              <div className="flex items-center gap-2 mb-3">
-                <History className="w-4 h-4 text-muted-foreground" />
-                <h2 className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Riwayat Hari Ini</h2>
-              </div>
+            <div className="space-y-4">
+              <h2 className="text-[10px] font-black uppercase tracking-widest text-muted-foreground px-1">Riwayat Hari Ini</h2>
               <div className="space-y-3">
                 {eventsLoading ? <Loader2 className="w-6 h-6 animate-spin mx-auto opacity-20" /> : 
                  todayStatus.events.length === 0 ? <p className="text-center text-xs text-muted-foreground py-8 italic">Belum ada aktivitas hari ini.</p> :
                  todayStatus.events.map((ev: any, i: number) => {
                    const dt = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
                    return (
-                     <div key={i} className="bg-white p-4 rounded-3xl border border-muted/20 shadow-sm flex justify-between items-center">
+                     <div key={i} className="bg-white p-4 rounded-3xl border shadow-sm flex justify-between items-center">
                        <div className="flex gap-4">
                          <div className={`p-2.5 rounded-2xl ${ev.type === 'IN' ? 'bg-primary/10 text-primary' : 'bg-secondary/10 text-secondary'}`}>
                            <Clock className="w-5 h-5" />
                          </div>
                          <div>
-                           <p className="text-xs font-black uppercase tracking-tight">TAP {ev.type}</p>
-                           <p className="text-[10px] text-muted-foreground font-medium line-clamp-1 max-w-[140px]">{ev.address || ev.siteName}</p>
+                           <p className="text-xs font-black uppercase">TAP {ev.type}</p>
+                           <p className="text-[10px] text-muted-foreground font-medium line-clamp-1 max-w-[150px]">{ev.address || ev.siteName}</p>
                          </div>
                        </div>
                        <div className="text-right">
@@ -478,37 +454,14 @@ export default function AbsenPage() {
             </div>
           </TabsContent>
 
-          <TabsContent value="laporan" className="p-4 pt-2 pb-20">
-            <Card className="mb-6 rounded-3xl shadow-md border-none">
-              <CardHeader className="pb-2">
-                <CardTitle className="text-base font-bold">Ringkasan Kehadiran</CardTitle>
-                <CardDescription className="text-[10px] uppercase font-bold opacity-60">Statistik Bulan Ini</CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid grid-cols-3 gap-3">
-                  <div className="text-center p-3 rounded-2xl bg-primary/5">
-                    <p className="text-lg font-black text-primary">{reportStats.totalDays}</p>
-                    <p className="text-[8px] font-bold text-muted-foreground uppercase">Hadir</p>
-                  </div>
-                  <div className="text-center p-3 rounded-2xl bg-destructive/5">
-                    <p className="text-lg font-black text-destructive">{reportStats.lates}</p>
-                    <p className="text-[8px] font-bold text-muted-foreground uppercase">Telat</p>
-                  </div>
-                  <div className="text-center p-3 rounded-2xl bg-orange-50">
-                    <p className="text-lg font-black text-orange-600">{reportStats.offsites}</p>
-                    <p className="text-[8px] font-bold text-muted-foreground uppercase">Offsite</p>
-                  </div>
-                </div>
-              </CardContent>
-            </Card>
-
-            <div className="space-y-4">
+          <TabsContent value="history" className="p-4">
+             <div className="space-y-4">
               <h3 className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Log Aktivitas Terbaru</h3>
               <div className="space-y-3">
-                {rawEvents?.slice(0, 10).map((ev: any, i: number) => {
+                {rawEvents?.map((ev: any, i: number) => {
                   const dt = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
                   return (
-                    <div key={i} className="bg-white p-4 rounded-3xl border border-muted/20 shadow-sm">
+                    <div key={i} className="bg-white p-4 rounded-3xl border shadow-sm">
                       <div className="flex justify-between items-start mb-2">
                         <div>
                           <p className="text-[10px] font-bold text-muted-foreground mb-0.5">{format(dt, 'EEEE, dd MMM yyyy', { locale: localeId })}</p>

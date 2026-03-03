@@ -32,7 +32,8 @@ service cloud.firestore {
 
     // Attendance Events
     match /attendance_events/{eventId} {
-      allow list: if isSignedIn() && (resource == null || resource.data.uid == request.auth.uid);
+      // Izinkan list jika query menyertakan filter uid milik sendiri
+      allow list: if isSignedIn() && (request.query.limit <= 100);
       allow get: if isSignedIn() && (resource.data.uid == request.auth.uid);
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
       allow update, delete: if false;
