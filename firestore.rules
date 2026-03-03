@@ -1,4 +1,3 @@
-
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -11,11 +10,12 @@ service cloud.firestore {
       return isSignedIn() && request.auth.uid == uid;
     }
 
-    // Role markers (Managed via Admin/HRP)
-    match /roles_admin/{uid} { allow read: if isSignedIn(); }
-    match /roles_hrd/{uid} { allow read: if isSignedIn(); }
+    // Site Configurations (Gedung A/B)
+    match /attendance_sites/{siteId} {
+      allow read: if isSignedIn();
+    }
 
-    // Users & Profiles
+    // User Profiles & Brands
     match /users/{uid} {
       allow read: if isSignedIn();
       allow write: if isOwner(uid);
@@ -26,23 +26,16 @@ service cloud.firestore {
       allow write: if isOwner(uid);
     }
 
-    // Attendance Configuration (Sites Gedung A/B)
-    match /attendance_sites/{siteId} {
+    match /brands/{brandId} {
       allow read: if isSignedIn();
-      allow write: if isSignedIn() && (exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)) || exists(/databases/$(database)/documents/roles_admin/$(request.auth.uid)));
     }
 
     // Attendance Events
     match /attendance_events/{eventId} {
       allow list: if isSignedIn() && (resource == null || resource.data.uid == request.auth.uid);
-      allow get: if isSignedIn() && (resource.data.uid == request.auth.uid || exists(/databases/$(database)/documents/roles_hrd/$(request.auth.uid)));
+      allow get: if isSignedIn() && (resource.data.uid == request.auth.uid);
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
       allow update, delete: if false;
-    }
-
-    // Brands (Support for useUser hook)
-    match /brands/{brandId} {
-      allow read: if isSignedIn();
     }
   }
 }
