@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { signOut } from 'firebase/auth';
 import { 
@@ -52,6 +52,10 @@ export default function AbsenPage() {
   const [submitting, setSubmitting] = useState(false);
   const [loadingSites, setLoadingSites] = useState(true);
 
+  // LONG PRESS STATE
+  const [holdProgress, setHoldProgress] = useState(0);
+  const holdInterval = useRef<NodeJS.Timeout | null>(null);
+
   useEffect(() => {
     if (!userLoading) {
       if (!user) {
@@ -72,19 +76,22 @@ export default function AbsenPage() {
       
       setLoadingSites(true);
       try {
-        // Query sites that are active
         const q = query(
           collection(db, 'attendance_sites'),
           where('isActive', '==', true)
         );
         const snap = await getDocs(q);
         
-        // Filter strictly by user's brandId on client-side for precision
+        // Filter strictly by user's brandId
         const brandSites = snap.docs
           .map(doc => ({ id: doc.id, ...doc.data() } as any))
-          .filter(site => site.brandIds?.includes(user.brandId));
+          .filter(site => {
+            const bIds = site.brandIds || [];
+            return Array.isArray(bIds) ? bIds.includes(user.brandId) : bIds === user.brandId;
+          });
         
         setSites(brandSites);
+        console.log("[SITE RESOLVER] Found sites for brand:", user.brandId, brandSites.map(s => s.name));
       } catch (err: any) {
         console.error("[SITE ERROR]", err.message);
       } finally {
@@ -204,7 +211,7 @@ export default function AbsenPage() {
     return new Promise((resolve, reject) => {
       const img = new Image();
       img.src = base64;
-      img.onerror = () => reject(new Error("Failed to load capture for watermarking"));
+      img.onerror = () => reject(new Error("Failed to load capture"));
       img.onload = () => {
         const canvas = document.createElement('canvas');
         canvas.width = img.width;
@@ -234,7 +241,7 @@ export default function AbsenPage() {
             ctx.fillText(line, p, y);
             line = words[n] + ' ';
             y += 30;
-            if (y > canvas.height - 20) break; // Safety break
+            if (y > canvas.height - 20) break;
           } else { line = test; }
         }
         ctx.fillText(line, p, y);
@@ -245,16 +252,6 @@ export default function AbsenPage() {
         resolve(canvas.toDataURL('image/jpeg', 0.8));
       };
     });
-  };
-
-  const dataURLtoBlob = (dataurl: string) => {
-    const arr = dataurl.split(',');
-    const mime = arr[0].match(/:(.*?);/)![1];
-    const bstr = atob(arr[1]);
-    let n = bstr.length;
-    const u8arr = new Uint8Array(n);
-    while (n--) u8arr[n] = bstr.charCodeAt(n);
-    return new Blob([u8arr], { type: mime });
   };
 
   const handleTap = async (mode: 'normal' | 'photo', photoBase64?: string) => {
@@ -271,8 +268,8 @@ export default function AbsenPage() {
         const storage = getStorage(firebaseApp);
         const path = `attendance/${user.uid}/${Date.now()}.jpg`;
         const storageRef = ref(storage, path);
-        
-        const blob = dataURLtoBlob(watermarked);
+        const response = await fetch(watermarked);
+        const blob = await response.blob();
         await uploadBytes(storageRef, blob);
         photoUrl = await getDownloadURL(storageRef);
       }
@@ -288,28 +285,57 @@ export default function AbsenPage() {
         tsServer: serverTimestamp(),
         mode,
         geo: { lat: location.lat, lng: location.lng, accuracyM: location.accuracy },
-        insideRadius: isInsideRadius,
-        distanceM: Math.round(distance || 0),
         address,
         photoUrl,
         status,
         lateMinutes,
-        shiftSnapshot: activeSite?.shift || null,
         flags: !isInsideRadius ? ['OFFSITE'] : []
       });
 
-      const message = status === 'LATE' ? `Absen berhasil. Terlambat ${lateMinutes} menit.` : `Absen ${nextAction} berhasil.`;
-      toast({ title: 'Sukses!', description: message });
+      toast({ title: 'Sukses!', description: `Absen ${nextAction} berhasil.` });
       setShowCamera(false);
+      setHoldProgress(0);
     } catch (err: any) {
       console.error("Attendance Error:", err);
-      toast({ 
-        variant: 'destructive', 
-        title: 'Gagal', 
-        description: err.message || 'Terjadi kesalahan sistem.'
-      });
+      toast({ variant: 'destructive', title: 'Gagal', description: err.message });
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  // LONG PRESS LOGIC FOR TAP OUT
+  const startHold = () => {
+    if (nextAction !== 'OUT' || !canTapNormal || submitting || isFinished) return;
+    
+    setHoldProgress(0);
+    const startTime = Date.now();
+    const duration = 3000;
+
+    holdInterval.current = setInterval(() => {
+      const elapsed = Date.now() - startTime;
+      const progress = Math.min((elapsed / duration) * 100, 100);
+      setHoldProgress(progress);
+
+      if (elapsed >= duration) {
+        if (holdInterval.current) clearInterval(holdInterval.current);
+        holdInterval.current = null;
+        setHoldProgress(0);
+        handleTap('normal');
+      }
+    }, 50);
+  };
+
+  const cancelHold = () => {
+    if (holdInterval.current) {
+      clearInterval(holdInterval.current);
+      holdInterval.current = null;
+    }
+    setHoldProgress(0);
+  };
+
+  const handleButtonClick = () => {
+    if (nextAction === 'IN') {
+      handleTap('normal');
     }
   };
 
@@ -385,24 +411,47 @@ export default function AbsenPage() {
             </Card>
 
             <div className="flex flex-col items-center gap-8 py-4">
-              <button
-                onClick={() => handleTap('normal')}
-                disabled={!canTapNormal || submitting || isFinished}
-                className={`
-                  relative w-48 h-48 rounded-full flex flex-col items-center justify-center gap-2 shadow-2xl transition-all active:scale-95
-                  ${nextAction === 'IN' ? 'bg-primary text-white' : 'bg-secondary text-white'}
-                  ${(isFinished || !canTapNormal) ? 'opacity-30 grayscale cursor-not-allowed' : 'hover:scale-105'}
-                  ${submitting ? 'animate-pulse' : ''}
-                `}
-              >
-                {submitting ? <Loader2 className="w-12 h-12 animate-spin" /> : (
-                  <>
-                    <Clock className="w-10 h-10 mb-1" />
-                    <span className="text-2xl font-black uppercase tracking-tighter">TAP {nextAction}</span>
-                    <span className="text-[9px] font-bold opacity-70 uppercase">No Photo Mode</span>
-                  </>
+              <div className="relative">
+                {/* CIRCULAR PROGRESS FOR TAP OUT */}
+                {nextAction === 'OUT' && holdProgress > 0 && (
+                  <svg className="absolute -inset-4 w-[calc(100%+32px)] h-[calc(100%+32px)] -rotate-90 pointer-events-none z-10">
+                    <circle
+                      cx="112" cy="112" r="104"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="6"
+                      strokeDasharray="653.45"
+                      strokeDashoffset={653.45 - (653.45 * holdProgress) / 100}
+                      className="text-secondary transition-all duration-75"
+                    />
+                  </svg>
                 )}
-              </button>
+                
+                <button
+                  onPointerDown={startHold}
+                  onPointerUp={cancelHold}
+                  onPointerLeave={cancelHold}
+                  onClick={handleButtonClick}
+                  disabled={!canTapNormal || submitting || isFinished}
+                  className={`
+                    relative w-48 h-48 rounded-full flex flex-col items-center justify-center gap-2 shadow-2xl transition-all
+                    ${nextAction === 'IN' ? 'bg-primary text-white active:scale-95' : 'bg-secondary text-white'}
+                    ${(isFinished || !canTapNormal) ? 'opacity-30 grayscale cursor-not-allowed' : 'hover:scale-105'}
+                    ${holdProgress > 0 ? 'scale-110' : ''}
+                    ${submitting ? 'animate-pulse' : ''}
+                  `}
+                >
+                  {submitting ? <Loader2 className="w-12 h-12 animate-spin" /> : (
+                    <>
+                      <Clock className="w-10 h-10 mb-1" />
+                      <span className="text-2xl font-black uppercase tracking-tighter">TAP {nextAction}</span>
+                      <span className="text-[9px] font-bold opacity-70 uppercase">
+                        {nextAction === 'OUT' ? 'Tahan 3 Detik' : 'No Photo Mode'}
+                      </span>
+                    </>
+                  )}
+                </button>
+              </div>
 
               {(!canTapNormal && !isFinished && sites.length > 0) && (
                 <div className="text-center px-4 space-y-4">
@@ -444,7 +493,7 @@ export default function AbsenPage() {
                        <div className="text-right">
                          <p className="text-sm font-black">{format(dt, 'HH:mm')}</p>
                          <Badge variant="outline" className={`text-[8px] h-4 py-0 border-none ${ev.status === 'LATE' ? 'bg-red-50 text-red-600' : 'bg-green-50 text-green-600'}`}>
-                           {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : (ev.status === 'ON_TIME' ? 'TEPAT WAKTU' : 'NORMAL')}
+                           {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : 'TEPAT WAKTU'}
                          </Badge>
                        </div>
                      </div>
@@ -470,7 +519,7 @@ export default function AbsenPage() {
                           <p className="text-xs font-black uppercase tracking-tight">TAP {ev.type} • {ev.siteName}</p>
                         </div>
                         <Badge variant="outline" className={`text-[9px] rounded-full px-3 ${ev.status === 'LATE' ? 'border-red-200 text-red-600 bg-red-50' : 'border-green-200 text-green-600 bg-green-50'}`}>
-                          {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : (ev.status === 'ON_TIME' ? 'TEPAT WAKTU' : 'NORMAL')}
+                          {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : 'TEPAT WAKTU'}
                         </Badge>
                       </div>
                       <div className="flex items-start gap-2 mt-2">
