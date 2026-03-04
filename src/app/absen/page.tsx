@@ -321,13 +321,13 @@ export default function AbsenPage() {
     }
   };
 
-  // LONG PRESS LOGIC FOR TAP OUT
+  // LONG PRESS LOGIC FOR TAP OUT (2 Detik)
   const startHold = () => {
     if (nextAction !== 'OUT' || !canTapNormal || submitting || isFinished || !isAttendanceAllowed) return;
     
     setHoldProgress(0);
     const startTime = Date.now();
-    const duration = 3000;
+    const duration = 2000; // Dikurangi menjadi 2 detik sesuai instruksi
 
     holdInterval.current = setInterval(() => {
       const elapsed = Date.now() - startTime;
@@ -479,7 +479,7 @@ export default function AbsenPage() {
                       <Clock className="w-10 h-10 mb-1" />
                       <span className="text-2xl font-black uppercase tracking-tighter">TAP {nextAction}</span>
                       <span className="text-[9px] font-bold opacity-70 uppercase">
-                        {nextAction === 'OUT' ? 'Tahan 3 Detik' : 'No Photo Mode'}
+                        {nextAction === 'OUT' ? 'Tahan 2 Detik' : 'No Photo Mode'}
                       </span>
                     </>
                   )}
