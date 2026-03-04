@@ -25,10 +25,12 @@ service cloud.firestore {
     
     // Koleksi Event Absensi
     match /attendance_events/{eventId} {
-      // User hanya bisa melihat dan membuat data milik sendiri
-      // Staf/Admin bisa melihat semua data
+      // User hanya bisa membuat data milik sendiri
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
-      allow get, list: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
+      
+      // Izin baca dipisah agar kegagalan evaluasi isStaff() tidak memblokir pemilik data
+      allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow read: if isStaff();
     }
 
     // Pendukung HRP
