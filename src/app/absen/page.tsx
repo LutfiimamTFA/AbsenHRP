@@ -27,7 +27,8 @@ import {
   Camera, 
   Navigation,
   FileText,
-  MapPin
+  MapPin,
+  ShieldAlert
 } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
 import { getDistance, getAddressFromLatLng } from '@/lib/geo-utils';
@@ -35,6 +36,7 @@ import { CameraCapture } from '@/components/camera-capture';
 import { format } from 'date-fns';
 import { id as localeId } from 'date-fns/locale';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
+import { Alert, AlertDescription, AlertTitle } from '@/components/ui/alert';
 
 export default function AbsenPage() {
   const { user, loading: userLoading } = useUser();
@@ -56,6 +58,23 @@ export default function AbsenPage() {
   const [holdProgress, setHoldProgress] = useState(0);
   const holdInterval = useRef<NodeJS.Timeout | null>(null);
 
+  // ACCESS CONTROL LOGIC
+  const isAttendanceAllowed = useMemo(() => {
+    if (!user) return false;
+    return user.employmentType === 'magang' || user.employmentType === 'training';
+  }, [user]);
+
+  const restrictedMessage = useMemo(() => {
+    if (!user) return null;
+    if (user.employmentType === 'karyawan') {
+      return "Akun ini menggunakan fingerprint, tidak bisa absen via Web Absen. Hubungi HRD.";
+    }
+    if (!user.employmentType) {
+      return "Status kepegawaian tidak terdeteksi. Hubungi HRD.";
+    }
+    return null;
+  }, [user]);
+
   useEffect(() => {
     if (!userLoading) {
       if (!user) {
@@ -69,7 +88,7 @@ export default function AbsenPage() {
   // SITE RESOLVER - STRICT BRAND FILTERING
   useEffect(() => {
     const loadSites = async () => {
-      if (!user?.brandId) {
+      if (!user?.brandId || !isAttendanceAllowed) {
         setLoadingSites(false);
         return;
       }
@@ -91,7 +110,6 @@ export default function AbsenPage() {
           });
         
         setSites(brandSites);
-        console.log("[SITE RESOLVER] Found sites for brand:", user.brandId, brandSites.map(s => s.name));
       } catch (err: any) {
         console.error("[SITE ERROR]", err.message);
       } finally {
@@ -99,10 +117,10 @@ export default function AbsenPage() {
       }
     };
     loadSites();
-  }, [db, user?.brandId]);
+  }, [db, user?.brandId, isAttendanceAllowed]);
 
   useEffect(() => {
-    if (!navigator.geolocation) return;
+    if (!navigator.geolocation || !isAttendanceAllowed) return;
     const watchId = navigator.geolocation.watchPosition(
       (pos) => {
         setLocation({
@@ -115,7 +133,7 @@ export default function AbsenPage() {
       { enableHighAccuracy: true, timeout: 15000, maximumAge: 0 }
     );
     return () => navigator.geolocation.clearWatch(watchId);
-  }, []);
+  }, [isAttendanceAllowed]);
 
   useEffect(() => {
     if (location && sites.length > 0) {
@@ -137,12 +155,12 @@ export default function AbsenPage() {
   }, [location, sites]);
 
   const historyQuery = useMemo(() => {
-    if (!user?.uid) return null;
+    if (!user?.uid || !isAttendanceAllowed) return null;
     return query(
       collection(db, 'attendance_events'),
       where('uid', '==', user.uid)
     );
-  }, [user?.uid, db]);
+  }, [user?.uid, db, isAttendanceAllowed]);
 
   const { data: rawEvents, loading: eventsLoading } = useCollection(historyQuery);
 
@@ -182,7 +200,7 @@ export default function AbsenPage() {
     return required ? location.accuracy <= required : true;
   }, [location, activeSite]);
 
-  const canTapNormal = isInsideRadius && isAccuracyOk && activeSite;
+  const canTapNormal = isAttendanceAllowed && isInsideRadius && isAccuracyOk && activeSite;
 
   const calculateStatus = (type: 'IN' | 'OUT', now: Date, site: any) => {
     if (!site?.shift) return { status: 'NORMAL', lateMinutes: 0 };
@@ -255,7 +273,7 @@ export default function AbsenPage() {
   };
 
   const handleTap = async (mode: 'normal' | 'photo', photoBase64?: string) => {
-    if (!user || !location || submitting || isFinished) return;
+    if (!user || !location || submitting || isFinished || !isAttendanceAllowed) return;
     setSubmitting(true);
     try {
       const now = new Date();
@@ -305,7 +323,7 @@ export default function AbsenPage() {
 
   // LONG PRESS LOGIC FOR TAP OUT
   const startHold = () => {
-    if (nextAction !== 'OUT' || !canTapNormal || submitting || isFinished) return;
+    if (nextAction !== 'OUT' || !canTapNormal || submitting || isFinished || !isAttendanceAllowed) return;
     
     setHoldProgress(0);
     const startTime = Date.now();
@@ -356,9 +374,14 @@ export default function AbsenPage() {
               <p className="text-[9px] text-muted-foreground uppercase font-black tracking-widest">{user?.brandName}</p>
             </div>
           </div>
-          <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="rounded-full">
-            <LogOut className="w-5 h-5" />
-          </Button>
+          <div className="flex items-center gap-1">
+            {user?.employmentType && (
+              <Badge variant="outline" className="text-[8px] h-5 uppercase px-2 bg-muted/30">{user.employmentType}</Badge>
+            )}
+            <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="rounded-full">
+              <LogOut className="w-5 h-5" />
+            </Button>
+          </div>
         </div>
 
         <Tabs defaultValue="absen" className="w-full">
@@ -368,7 +391,17 @@ export default function AbsenPage() {
           </TabsList>
 
           <TabsContent value="absen" className="p-4 space-y-6">
-            {!loadingSites && sites.length === 0 && (
+            {!isAttendanceAllowed && (
+              <Alert variant="destructive" className="border-destructive/50 bg-destructive/5">
+                <ShieldAlert className="h-4 w-4" />
+                <AlertTitle className="text-xs font-black uppercase">Akses Dibatasi</AlertTitle>
+                <AlertDescription className="text-[11px] leading-tight mt-1">
+                  {restrictedMessage || "Hubungi HRD untuk akses absensi."}
+                </AlertDescription>
+              </Alert>
+            )}
+
+            {isAttendanceAllowed && !loadingSites && sites.length === 0 && (
               <Card className="border-destructive/50 bg-destructive/5">
                 <CardContent className="pt-6 flex items-center gap-3 text-destructive">
                   <AlertTriangle className="w-5 h-5 shrink-0" />
@@ -379,7 +412,7 @@ export default function AbsenPage() {
               </Card>
             )}
 
-            <Card className="border-none shadow-sm rounded-3xl overflow-hidden bg-white">
+            <Card className={`border-none shadow-sm rounded-3xl overflow-hidden bg-white ${!isAttendanceAllowed ? 'opacity-40 grayscale pointer-events-none' : ''}`}>
               <CardContent className="pt-6 space-y-4">
                 <div className="flex justify-center gap-2">
                   {isInsideRadius ? (
@@ -413,7 +446,7 @@ export default function AbsenPage() {
             <div className="flex flex-col items-center gap-8 py-4">
               <div className="relative">
                 {/* CIRCULAR PROGRESS FOR TAP OUT */}
-                {nextAction === 'OUT' && holdProgress > 0 && (
+                {isAttendanceAllowed && nextAction === 'OUT' && holdProgress > 0 && (
                   <svg className="absolute -inset-4 w-[calc(100%+32px)] h-[calc(100%+32px)] -rotate-90 pointer-events-none z-10">
                     <circle
                       cx="112" cy="112" r="104"
@@ -432,11 +465,11 @@ export default function AbsenPage() {
                   onPointerUp={cancelHold}
                   onPointerLeave={cancelHold}
                   onClick={handleButtonClick}
-                  disabled={!canTapNormal || submitting || isFinished}
+                  disabled={!canTapNormal || submitting || isFinished || !isAttendanceAllowed}
                   className={`
                     relative w-48 h-48 rounded-full flex flex-col items-center justify-center gap-2 shadow-2xl transition-all
                     ${nextAction === 'IN' ? 'bg-primary text-white active:scale-95' : 'bg-secondary text-white'}
-                    ${(isFinished || !canTapNormal) ? 'opacity-30 grayscale cursor-not-allowed' : 'hover:scale-105'}
+                    ${(isFinished || !canTapNormal || !isAttendanceAllowed) ? 'opacity-30 grayscale cursor-not-allowed' : 'hover:scale-105'}
                     ${holdProgress > 0 ? 'scale-110' : ''}
                     ${submitting ? 'animate-pulse' : ''}
                   `}
@@ -453,7 +486,7 @@ export default function AbsenPage() {
                 </button>
               </div>
 
-              {(!canTapNormal && !isFinished && sites.length > 0) && (
+              {(isAttendanceAllowed && !canTapNormal && !isFinished && sites.length > 0) && (
                 <div className="text-center px-4 space-y-4">
                   <p className="text-xs text-muted-foreground font-medium italic">Anda berada di luar radius.</p>
                   <Button onClick={() => setShowCamera(true)} variant="outline" className="rounded-full px-8 py-7 h-auto border-primary/20 bg-primary/5 hover:bg-primary/10 gap-3">
@@ -476,7 +509,9 @@ export default function AbsenPage() {
             <div className="space-y-4">
               <h2 className="text-[10px] font-black uppercase tracking-widest text-muted-foreground px-1">Aktivitas Hari Ini</h2>
               <div className="space-y-3">
-                {todayStatus.events.length === 0 ? <p className="text-center text-xs text-muted-foreground py-8 italic">Belum ada aktivitas.</p> :
+                {!isAttendanceAllowed ? (
+                   <p className="text-center text-xs text-muted-foreground py-8 italic opacity-50">Riwayat tidak tersedia untuk tipe akun ini.</p>
+                ) : todayStatus.events.length === 0 ? <p className="text-center text-xs text-muted-foreground py-8 italic">Belum ada aktivitas.</p> :
                  todayStatus.events.map((ev: any, i: number) => {
                    const dt = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date();
                    return (
@@ -508,7 +543,12 @@ export default function AbsenPage() {
              <div className="space-y-4">
               <h3 className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Log Absensi Terbaru</h3>
               <div className="space-y-3">
-                {eventsLoading ? <Loader2 className="w-6 h-6 animate-spin mx-auto opacity-20" /> :
+                {!isAttendanceAllowed ? (
+                   <div className="py-12 flex flex-col items-center gap-3 text-muted-foreground opacity-50">
+                     <FileText className="w-8 h-8" />
+                     <p className="text-xs italic">Log riwayat tidak tersedia.</p>
+                   </div>
+                ) : eventsLoading ? <Loader2 className="w-6 h-6 animate-spin mx-auto opacity-20" /> :
                  sortedEvents.map((ev: any, i: number) => {
                   const dt = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date();
                   return (

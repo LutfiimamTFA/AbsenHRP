@@ -18,6 +18,7 @@ export interface ExtendedUser {
   brandName?: string;
   brandId?: string;
   division?: string;
+  employmentType?: string;
 }
 
 export function useUser() {
@@ -95,7 +96,8 @@ export function useUser() {
           isInternal,
           brandName: brandName || "Brand belum diatur",
           brandId: userData?.brandId,
-          division: userData?.division
+          division: userData?.division,
+          employmentType: userData?.employmentType
         });
       } catch (err) {
         setUser({
