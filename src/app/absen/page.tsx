@@ -54,7 +54,7 @@ export default function AbsenPage() {
   const [submitting, setSubmitting] = useState(false);
   const [loadingSites, setLoadingSites] = useState(true);
 
-  // LONG PRESS STATE
+  // LONG PRESS STATE (2 Detik untuk TAP OUT)
   const [holdProgress, setHoldProgress] = useState(0);
   const holdInterval = useRef<NodeJS.Timeout | null>(null);
 
@@ -87,9 +87,11 @@ export default function AbsenPage() {
 
   // SITE RESOLVER - STRICT BRAND FILTERING
   useEffect(() => {
+    if (userLoading || !user) return; // Tunggu data user tersedia sebelum query
+
     const loadSites = async () => {
-      if (!user?.brandId || !isAttendanceAllowed) {
-        if (!userLoading) setLoadingSites(false);
+      if (!isAttendanceAllowed || !user.brandId) {
+        setLoadingSites(false);
         return;
       }
       
@@ -103,15 +105,13 @@ export default function AbsenPage() {
         
         const allSites = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
         
-        console.log("[DEBUG] User Brand ID:", user.brandId);
+        console.log("[SITE RESOLVER] User Brand ID:", user.brandId);
         
-        // Filter strictly by user's brandId
+        // Filter secara ketat berdasarkan brandId user
         const brandSites = allSites.filter(site => {
           const bIds = site.brandIds || [];
           const sBrandId = site.brandId;
           const userBrandId = user.brandId;
-          
-          if (!userBrandId) return false;
           
           const isBrandMatch = Array.isArray(bIds) 
             ? bIds.includes(userBrandId) 
@@ -122,21 +122,21 @@ export default function AbsenPage() {
           return isBrandMatch || isDirectMatch;
         });
 
-        console.log("[DEBUG] Filtered Sites for User:", brandSites.map(s => s.name));
+        console.log("[SITE RESOLVER] Filtered Candidate Sites:", brandSites.map(s => s.name));
         setSites(brandSites);
       } catch (err: any) {
         console.error("[SITE ERROR]", err.message);
         toast({
           variant: 'destructive',
           title: 'Gagal Memuat Lokasi',
-          description: 'Pastikan Anda memiliki izin akses lokasi kantor.'
+          description: 'Pastikan koneksi internet stabil dan GPS aktif.'
         });
       } finally {
         setLoadingSites(false);
       }
     };
     loadSites();
-  }, [db, user?.brandId, isAttendanceAllowed, userLoading, toast]);
+  }, [db, user, userLoading, isAttendanceAllowed, toast]);
 
   useEffect(() => {
     if (!navigator.geolocation || !isAttendanceAllowed) return;
@@ -340,7 +340,6 @@ export default function AbsenPage() {
     }
   };
 
-  // LONG PRESS LOGIC FOR TAP OUT (2 Detik)
   const startHold = () => {
     if (nextAction !== 'OUT' || !canTapNormal || submitting || isFinished || !isAttendanceAllowed) return;
     
@@ -425,7 +424,7 @@ export default function AbsenPage() {
                 <CardContent className="pt-6 flex items-center gap-3 text-destructive">
                   <AlertTriangle className="w-5 h-5 shrink-0" />
                   <p className="text-xs font-bold uppercase tracking-tight">
-                    Brand kamu belum punya site absensi. Hubungi HRD.
+                    Brand Anda belum memiliki site absensi yang terdaftar.
                   </p>
                 </CardContent>
               </Card>
@@ -497,7 +496,7 @@ export default function AbsenPage() {
                       <Clock className="w-10 h-10 mb-1" />
                       <span className="text-2xl font-black uppercase tracking-tighter">TAP {nextAction}</span>
                       <span className="text-[9px] font-bold opacity-70 uppercase">
-                        {nextAction === 'OUT' ? 'Tahan 2 Detik' : 'No Photo Mode'}
+                        {nextAction === 'OUT' ? 'Tahan 2 Detik' : 'Sekali Klik'}
                       </span>
                     </>
                   )}
@@ -506,7 +505,7 @@ export default function AbsenPage() {
 
               {(isAttendanceAllowed && !canTapNormal && !isFinished && sites.length > 0) && (
                 <div className="text-center px-4 space-y-4">
-                  <p className="text-xs text-muted-foreground font-medium italic">Anda berada di luar radius.</p>
+                  <p className="text-xs text-muted-foreground font-medium italic">Anda berada di luar radius kantor.</p>
                   <Button onClick={() => setShowCamera(true)} variant="outline" className="rounded-full px-8 py-7 h-auto border-primary/20 bg-primary/5 hover:bg-primary/10 gap-3">
                     <Camera className="w-6 h-6 text-primary" />
                     <div className="text-left">
@@ -529,7 +528,7 @@ export default function AbsenPage() {
               <div className="space-y-3">
                 {!isAttendanceAllowed ? (
                    <p className="text-center text-xs text-muted-foreground py-8 italic opacity-50">Riwayat tidak tersedia untuk tipe akun ini.</p>
-                ) : todayStatus.events.length === 0 ? <p className="text-center text-xs text-muted-foreground py-8 italic">Belum ada aktivitas.</p> :
+                ) : todayStatus.events.length === 0 ? <p className="text-center text-xs text-muted-foreground py-8 italic">Belum ada aktivitas hari ini.</p> :
                  todayStatus.events.map((ev: any, i: number) => {
                    const dt = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date();
                    return (

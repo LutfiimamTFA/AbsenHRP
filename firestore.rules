@@ -30,7 +30,8 @@ service cloud.firestore {
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
       
       // Izinkan baca jika pemilik data ATAU jika user adalah staf/admin
-      allow read: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
+      // Gunakan get, list agar query 'where uid == auth.uid' berhasil
+      allow get, list: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
     }
 
     // Koleksi Penunjang Site Resolver & HRP
