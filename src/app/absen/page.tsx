@@ -103,20 +103,26 @@ export default function AbsenPage() {
         
         const allSites = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
         
-        // Log untuk audit brand
         console.log("[DEBUG] User Brand ID:", user.brandId);
-        console.log("[DEBUG] All Active Sites:", allSites.map(s => `${s.name} (${s.brandIds})`));
-
+        
         // Filter strictly by user's brandId
         const brandSites = allSites.filter(site => {
           const bIds = site.brandIds || [];
+          const sBrandId = site.brandId;
           const userBrandId = user.brandId;
+          
           if (!userBrandId) return false;
-          return Array.isArray(bIds) ? bIds.includes(userBrandId) : bIds === userBrandId;
+          
+          const isBrandMatch = Array.isArray(bIds) 
+            ? bIds.includes(userBrandId) 
+            : bIds === userBrandId;
+            
+          const isDirectMatch = sBrandId === userBrandId;
+          
+          return isBrandMatch || isDirectMatch;
         });
 
         console.log("[DEBUG] Filtered Sites for User:", brandSites.map(s => s.name));
-        
         setSites(brandSites);
       } catch (err: any) {
         console.error("[SITE ERROR]", err.message);
@@ -299,8 +305,8 @@ export default function AbsenPage() {
         const storage = getStorage(firebaseApp);
         const path = `attendance/${user.uid}/${Date.now()}.jpg`;
         const storageRef = ref(storage, path);
-        const response = await fetch(watermarked);
-        const blob = await response.blob();
+        const blobResponse = await fetch(watermarked);
+        const blob = await blobResponse.blob();
         await uploadBytes(storageRef, blob);
         photoUrl = await getDownloadURL(storageRef);
       }
@@ -370,7 +376,7 @@ export default function AbsenPage() {
     }
   };
 
-  if (userLoading || loadingSites) {
+  if (userLoading || (loadingSites && isAttendanceAllowed)) {
     return <div className="min-h-svh flex items-center justify-center"><Loader2 className="w-8 h-8 animate-spin text-primary" /></div>;
   }
 
@@ -458,7 +464,6 @@ export default function AbsenPage() {
 
             <div className="flex flex-col items-center gap-8 py-4">
               <div className="relative">
-                {/* CIRCULAR PROGRESS FOR TAP OUT */}
                 {isAttendanceAllowed && nextAction === 'OUT' && holdProgress > 0 && (
                   <svg className="absolute -inset-4 w-[calc(100%+32px)] h-[calc(100%+32px)] -rotate-90 pointer-events-none z-10">
                     <circle
