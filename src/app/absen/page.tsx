@@ -89,7 +89,7 @@ export default function AbsenPage() {
   useEffect(() => {
     const loadSites = async () => {
       if (!user?.brandId || !isAttendanceAllowed) {
-        setLoadingSites(false);
+        if (!userLoading) setLoadingSites(false);
         return;
       }
       
@@ -101,23 +101,36 @@ export default function AbsenPage() {
         );
         const snap = await getDocs(q);
         
+        const allSites = snap.docs.map(doc => ({ id: doc.id, ...doc.data() } as any));
+        
+        // Log untuk audit brand
+        console.log("[DEBUG] User Brand ID:", user.brandId);
+        console.log("[DEBUG] All Active Sites:", allSites.map(s => `${s.name} (${s.brandIds})`));
+
         // Filter strictly by user's brandId
-        const brandSites = snap.docs
-          .map(doc => ({ id: doc.id, ...doc.data() } as any))
-          .filter(site => {
-            const bIds = site.brandIds || [];
-            return Array.isArray(bIds) ? bIds.includes(user.brandId) : bIds === user.brandId;
-          });
+        const brandSites = allSites.filter(site => {
+          const bIds = site.brandIds || [];
+          const userBrandId = user.brandId;
+          if (!userBrandId) return false;
+          return Array.isArray(bIds) ? bIds.includes(userBrandId) : bIds === userBrandId;
+        });
+
+        console.log("[DEBUG] Filtered Sites for User:", brandSites.map(s => s.name));
         
         setSites(brandSites);
       } catch (err: any) {
         console.error("[SITE ERROR]", err.message);
+        toast({
+          variant: 'destructive',
+          title: 'Gagal Memuat Lokasi',
+          description: 'Pastikan Anda memiliki izin akses lokasi kantor.'
+        });
       } finally {
         setLoadingSites(false);
       }
     };
     loadSites();
-  }, [db, user?.brandId, isAttendanceAllowed]);
+  }, [db, user?.brandId, isAttendanceAllowed, userLoading, toast]);
 
   useEffect(() => {
     if (!navigator.geolocation || !isAttendanceAllowed) return;
@@ -327,7 +340,7 @@ export default function AbsenPage() {
     
     setHoldProgress(0);
     const startTime = Date.now();
-    const duration = 2000; // Dikurangi menjadi 2 detik sesuai instruksi
+    const duration = 2000;
 
     holdInterval.current = setInterval(() => {
       const elapsed = Date.now() - startTime;

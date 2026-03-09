@@ -20,7 +20,7 @@ service cloud.firestore {
     
     // Koleksi Lokasi Kantor (Site A/B)
     match /attendance_sites/{siteId} {
-      // Izinkan baca untuk semua user agar site resolver dan monitoring jalan
+      // Izinkan baca (get & list) untuk semua user agar site resolver jalan
       allow read: if isSignedIn();
     }
     
