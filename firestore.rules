@@ -8,6 +8,7 @@ service cloud.firestore {
     
     function isStaff() {
       return isSignedIn() && 
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
         get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['hrd', 'manager', 'superadmin', 'super-admin'];
     }
 
@@ -19,7 +20,7 @@ service cloud.firestore {
     
     // Koleksi Lokasi Kantor (Site A/B)
     match /attendance_sites/{siteId} {
-      // Izinkan baca (get & list) untuk semua user agar site resolver jalan
+      // Izinkan baca untuk semua user agar site resolver dan monitoring jalan
       allow read: if isSignedIn();
     }
     
@@ -28,12 +29,11 @@ service cloud.firestore {
       // User hanya bisa membuat data milik sendiri
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
       
-      // Izin baca dipisah agar kegagalan evaluasi isStaff() tidak memblokir pemilik data
-      allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
-      allow read: if isStaff();
+      // Izinkan baca jika pemilik data ATAU jika user adalah staf/admin
+      allow read: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
     }
 
-    // Pendukung HRP
+    // Koleksi Penunjang Site Resolver & HRP
     match /profiles/{uid} {
       allow read: if isSignedIn();
     }
@@ -42,7 +42,11 @@ service cloud.firestore {
       allow read: if isSignedIn();
     }
     
-    // Fallback untuk akses admin HRP ke koleksi lain
+    match /work_locations/{locId} {
+      allow read: if isSignedIn();
+    }
+
+    // Fallback global untuk akses admin/staf ke seluruh database
     match /{path=**} {
       allow read: if isStaff();
     }
