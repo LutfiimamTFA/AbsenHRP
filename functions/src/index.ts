@@ -120,37 +120,33 @@ export const submitAttendance = functions.https.onCall(
 export const uploadToDrive = functions
   .region("us-central1")
   .https.onRequest(async (req, res) => {
-    // Build allowed origins from env or defaults
-    const defaults = ["http://localhost:9002", "http://localhost:3000"];
-    const envList = (process.env.ALLOWED_ORIGINS || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const prodOrigins = (process.env.PRODUCTION_ORIGINS || "")
-      .split(",")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    const allowed = new Set<string>([...defaults, ...envList, ...prodOrigins]);
+    // Fixed allowed origins list
+    const allowedOrigins = [
+      "http://localhost:9002",
+      "http://localhost:3000",
+      // replace with your production domains
+      "https://DOMAIN_HRP_PRODUCTION",
+      "https://DOMAIN_WEB_ABSEN_PRODUCTION",
+    ];
 
-    const origin = req.get("Origin");
-    const corsAllowed = !origin || allowed.has(origin) || allowed.size === 0;
-
-    const setCors = (r: any) => {
-      // Always include CORS headers per requirement
-      if (origin && allowed.has(origin)) {
-        r.setHeader("Access-Control-Allow-Origin", origin);
-      } else {
-        r.setHeader("Access-Control-Allow-Origin", origin || "*");
+    function setCors(req: any, res: any) {
+      const origin = req.headers?.origin;
+      if (origin && allowedOrigins.includes(origin)) {
+        res.setHeader("Access-Control-Allow-Origin", origin);
       }
-      r.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
-      r.setHeader(
+      res.setHeader("Vary", "Origin");
+      res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+      res.setHeader(
         "Access-Control-Allow-Headers",
         "Content-Type, Authorization",
       );
-    };
+    }
 
     try {
-      setCors(res);
+      // set CORS headers before any potential return
+      const origin = req.headers?.origin;
+      const corsAllowed = !origin || allowedOrigins.includes(origin);
+      setCors(req, res);
 
       if (req.method === "OPTIONS") {
         res.status(204).end();
@@ -158,12 +154,12 @@ export const uploadToDrive = functions
       }
 
       if (req.method !== "POST") {
-        res.status(405).json({ error: "Method not allowed" });
+        res.status(405).json({ success: false, error: "Method not allowed" });
         return;
       }
 
       if (!corsAllowed) {
-        res.status(403).json({ error: "Origin not allowed" });
+        res.status(403).json({ success: false, error: "Origin not allowed" });
         return;
       }
 
@@ -249,7 +245,8 @@ export const uploadToDrive = functions
         fields: "id, webViewLink, webContentLink",
       });
 
-      setCors(res);
+      // ensure CORS headers set for final response
+      setCors(req, res);
       res.json({
         success: true,
         fileId: fileMeta.data.id,
@@ -259,7 +256,7 @@ export const uploadToDrive = functions
     } catch (err: any) {
       console.error("uploadToDrive error", err);
       try {
-        setCors(res);
+        setCors(req, res);
         res
           .status(500)
           .json({ success: false, error: "Failed to upload to Google Drive" });
