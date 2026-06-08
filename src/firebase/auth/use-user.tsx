@@ -49,25 +49,26 @@ export function useUser() {
         console.log('[EMPLOYEE SYNC] authUid:', firebaseUser.uid);
         console.log('[EMPLOYEE SYNC] employeeProfile (raw):', ep ? JSON.parse(JSON.stringify(ep)) : null);
 
+        // ── hrdEmploymentInfo nested (dari HRP utama) ────────────────────────
+        const hrd: Record<string, any> = ep?.hrdEmploymentInfo || {};
+
         // ── NAMA ──────────────────────────────────────────────────────────────
         let resolvedName: string | undefined =
           ep?.fullName || ep?.namaLengkap || ep?.displayName || ep?.name;
 
-        // ── BRAND (string langsung) ───────────────────────────────────────────
-        // Coba baca nilai string brand/perusahaan dari employee_profiles terlebih dulu
+        // ── BRAND (string langsung) — hrdEmploymentInfo diutamakan ────────────
         let resolvedBrand: string | undefined =
+          hrd.brandName    || hrd.brand    || hrd.company   ||
           ep?.brandName    || ep?.companyName  || ep?.companyLabel ||
           ep?.company      || ep?.unitName     || ep?.brand        ||
           ep?.perusahaan   || ep?.namaPerusahaan;
 
         // ── BRAND (via reference ID) ──────────────────────────────────────────
-        // Jika employee_profiles menyimpan brandId / companyId sebagai reference,
-        // resolve ke nama dari collection brands / companies.
         const epBrandRefId: string | undefined =
+          hrd.brandId || hrd.companyId ||
           ep?.brandId || ep?.companyId || ep?.brandRef;
 
         if (!resolvedBrand && epBrandRefId) {
-          // Coba kedua kemungkinan nama collection
           const [brandSnap, companySnap] = await Promise.all([
             getDoc(doc(db, 'brands', epBrandRefId)).catch(() => null),
             getDoc(doc(db, 'companies', epBrandRefId)).catch(() => null),
@@ -82,19 +83,21 @@ export function useUser() {
           console.log('[EMPLOYEE SYNC] brand via epBrandRefId', epBrandRefId, '→', resolvedBrand);
         }
 
-        // ── DIVISI ────────────────────────────────────────────────────────────
+        // ── DIVISI — hrdEmploymentInfo diutamakan ─────────────────────────────
         let division: string | undefined =
+          hrd.divisionName || hrd.division ||
           ep?.divisionName || ep?.division || ep?.divisi ||
           ep?.departement  || ep?.department;
 
-        // ── NOMOR INDUK KARYAWAN ──────────────────────────────────────────────
+        // ── NOMOR INDUK KARYAWAN — hrdEmploymentInfo diutamakan ───────────────
         // PENTING: JANGAN masukkan nik / nomorKtp / ktpNumber / identityNumber
         let resolvedEmployeeId: string | undefined =
-          ep?.employeeId           || ep?.employeeNumber  ||
-          ep?.employeeCode         || ep?.nomorIndukKaryawan ||
-          ep?.nomorInduk           || ep?.nip             ||
-          ep?.nomorKaryawan        || ep?.noKaryawan      ||
-          ep?.kodeKaryawan         || ep?.nomorPegawai;
+          hrd.employeeId    || hrd.employeeNumber || hrd.employeeCode ||
+          ep?.employeeId    || ep?.employeeNumber ||
+          ep?.employeeCode  || ep?.nomorIndukKaryawan ||
+          ep?.nomorInduk    || ep?.nip             ||
+          ep?.nomorKaryawan || ep?.noKaryawan      ||
+          ep?.kodeKaryawan  || ep?.nomorPegawai;
 
         let employmentType: string | undefined = ep?.employmentType;
         let attendanceMethod: string | undefined = ep?.attendanceMethod;
