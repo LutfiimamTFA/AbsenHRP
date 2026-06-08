@@ -34,6 +34,12 @@ service cloud.firestore {
       allow get, list: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
     }
 
+    // Koleksi profil karyawan dari HRP utama (berisi attendanceMethod, dll.)
+    match /employee_profiles/{uid} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow read, write: if isStaff();
+    }
+
     // Koleksi Penunjang Site Resolver & HRP
     match /profiles/{uid} {
       allow read: if isSignedIn();

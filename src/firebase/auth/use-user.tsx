@@ -18,7 +18,10 @@ export interface ExtendedUser {
   brandName?: string;
   brandId?: string;
   division?: string;
+  employeeId?: string;
   employmentType?: string;
+  attendanceMethod?: string;
+  employeeProfileFound?: boolean;
 }
 
 export function useUser() {
@@ -37,31 +40,100 @@ export function useUser() {
 
       setLoading(true);
       try {
+        // PRIORITAS UTAMA: ambil dari employee_profiles (source of truth HRP utama)
+        const employeeProfileDoc = await getDoc(doc(db, 'employee_profiles', firebaseUser.uid));
+        const ep = employeeProfileDoc.exists() ? employeeProfileDoc.data() : null;
+        const employeeProfileFound = !!ep;
+
+        // [DEBUG] Dump seluruh isi employee_profiles supaya bisa trace field yang dipakai
+        console.log('[EMPLOYEE SYNC] authUid:', firebaseUser.uid);
+        console.log('[EMPLOYEE SYNC] employeeProfile (raw):', ep ? JSON.parse(JSON.stringify(ep)) : null);
+
+        // ── NAMA ──────────────────────────────────────────────────────────────
+        let resolvedName: string | undefined =
+          ep?.fullName || ep?.namaLengkap || ep?.displayName || ep?.name;
+
+        // ── BRAND (string langsung) ───────────────────────────────────────────
+        // Coba baca nilai string brand/perusahaan dari employee_profiles terlebih dulu
+        let resolvedBrand: string | undefined =
+          ep?.brandName    || ep?.companyName  || ep?.companyLabel ||
+          ep?.company      || ep?.unitName     || ep?.brand        ||
+          ep?.perusahaan   || ep?.namaPerusahaan;
+
+        // ── BRAND (via reference ID) ──────────────────────────────────────────
+        // Jika employee_profiles menyimpan brandId / companyId sebagai reference,
+        // resolve ke nama dari collection brands / companies.
+        const epBrandRefId: string | undefined =
+          ep?.brandId || ep?.companyId || ep?.brandRef;
+
+        if (!resolvedBrand && epBrandRefId) {
+          // Coba kedua kemungkinan nama collection
+          const [brandSnap, companySnap] = await Promise.all([
+            getDoc(doc(db, 'brands', epBrandRefId)).catch(() => null),
+            getDoc(doc(db, 'companies', epBrandRefId)).catch(() => null),
+          ]);
+          const refData = brandSnap?.exists()
+            ? brandSnap.data()
+            : companySnap?.exists() ? companySnap.data() : null;
+          if (refData) {
+            resolvedBrand =
+              refData.brandName || refData.companyName || refData.name || refData.label;
+          }
+          console.log('[EMPLOYEE SYNC] brand via epBrandRefId', epBrandRefId, '→', resolvedBrand);
+        }
+
+        // ── DIVISI ────────────────────────────────────────────────────────────
+        let division: string | undefined =
+          ep?.divisionName || ep?.division || ep?.divisi ||
+          ep?.departement  || ep?.department;
+
+        // ── NOMOR INDUK KARYAWAN ──────────────────────────────────────────────
+        // PENTING: JANGAN masukkan nik / nomorKtp / ktpNumber / identityNumber
+        let resolvedEmployeeId: string | undefined =
+          ep?.employeeId           || ep?.employeeNumber  ||
+          ep?.employeeCode         || ep?.nomorIndukKaryawan ||
+          ep?.nomorInduk           || ep?.nip             ||
+          ep?.nomorKaryawan        || ep?.noKaryawan      ||
+          ep?.kodeKaryawan         || ep?.nomorPegawai;
+
+        let employmentType: string | undefined = ep?.employmentType;
+        let attendanceMethod: string | undefined = ep?.attendanceMethod;
+
+        // ── FALLBACK role dari users/{uid} ────────────────────────────────────
         let resolvedRole: UserRole = 'employee';
         const userDocRef = doc(db, 'users', firebaseUser.uid);
         const userDoc = await getDoc(userDocRef);
-        const userData = userDoc.data();
-        
-        if (userDoc.exists() && userData?.role) {
-          resolvedRole = userData.role;
+        const userData = userDoc.exists() ? userDoc.data() : null;
+
+        if (userData?.role) resolvedRole = userData.role;
+
+        // Fallback nama jika employee_profiles tidak ada
+        if (!resolvedName) {
+          resolvedName =
+            firebaseUser.displayName || firebaseUser.email?.split('@')[0] || 'User';
         }
 
-        let resolvedName = userData?.displayName || userData?.name || userData?.fullName;
-        
-        if (!resolvedName) {
-          const profileDoc = await getDoc(doc(db, 'profiles', firebaseUser.uid));
-          if (profileDoc.exists()) {
-            resolvedName = profileDoc.data()?.fullName;
+        // Fallback brand — HANYA jika employee_profiles benar-benar tidak punya brand
+        if (!resolvedBrand) {
+          const fallbackBrandId = userData?.brandId;
+          if (fallbackBrandId) {
+            const brandDoc = await getDoc(doc(db, 'brands', fallbackBrandId));
+            if (brandDoc.exists()) {
+              const bd = brandDoc.data();
+              resolvedBrand = bd?.brandName || bd?.companyName || bd?.name;
+            }
           }
+          if (!resolvedBrand) resolvedBrand = userData?.brandName;
         }
 
-        if (!resolvedName) {
-          resolvedName = firebaseUser.displayName;
-        }
-
-        if (!resolvedName && firebaseUser.email) {
-          resolvedName = firebaseUser.email.split('@')[0];
-        }
+        // [DEBUG] Ringkasan nilai yang akan dipakai di UI
+        console.log('[EMPLOYEE SYNC] resolved →', {
+          resolvedBrand,
+          resolvedEmployeeId,
+          attendanceMethod,
+          division,
+          resolvedName,
+        });
 
         const roleLabels: Record<string, string> = {
           'karyawan': 'Karyawan',
@@ -73,14 +145,6 @@ export function useUser() {
           'kandidat': 'Kandidat'
         };
         const userRoleLabel = roleLabels[resolvedRole] || resolvedRole;
-
-        let brandName = userData?.brandName;
-        if (!brandName && userData?.brandId) {
-          const brandDoc = await getDoc(doc(db, 'brands', userData.brandId));
-          if (brandDoc.exists()) {
-            brandName = brandDoc.data()?.name;
-          }
-        }
 
         const internalRoles: UserRole[] = ['superadmin', 'super-admin', 'hrd', 'manager', 'karyawan', 'employee'];
         const isInternal = internalRoles.includes(resolvedRole);
@@ -96,8 +160,11 @@ export function useUser() {
           isInternal,
           brandName: brandName || "Brand belum diatur",
           brandId: userData?.brandId,
-          division: userData?.division,
-          employmentType: userData?.employmentType
+          division: division || userData?.division,
+          employeeId,
+          employmentType: employmentType || userData?.employmentType,
+          attendanceMethod,
+          employeeProfileFound,
         });
       } catch (err) {
         setUser({

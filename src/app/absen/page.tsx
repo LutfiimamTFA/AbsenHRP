@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import { signOut } from 'firebase/auth';
 import { 
@@ -58,19 +58,28 @@ export default function AbsenPage() {
   const [holdProgress, setHoldProgress] = useState(0);
   const holdInterval = useRef<NodeJS.Timeout | null>(null);
 
-  // ACCESS CONTROL LOGIC
+  // HISTORY FILTER STATE
+  const [historyFilterMode, setHistoryFilterMode] = useState<'quick' | 'custom' | 'month'>('quick');
+  const [selectedQuickFilter, setSelectedQuickFilter] = useState<'today' | 'week' | 'month' | 'year'>('month');
+  const [customStartDate, setCustomStartDate] = useState<string>(new Date(new Date().setDate(new Date().getDate() - 7)).toISOString().split('T')[0]);
+  const [customEndDate, setCustomEndDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [selectedMonth, setSelectedMonth] = useState<string>(new Date().toISOString().slice(0, 7));
+  const [selectedYear, setSelectedYear] = useState<number>(new Date().getFullYear());
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+
+  // ACCESS CONTROL LOGIC — berdasarkan attendanceMethod dari employee_profiles
   const isAttendanceAllowed = useMemo(() => {
     if (!user) return false;
-    return user.employmentType === 'magang' || user.employmentType === 'training';
+    return user.attendanceMethod === 'web_absen';
   }, [user]);
 
   const restrictedMessage = useMemo(() => {
     if (!user) return null;
-    if (user.employmentType === 'karyawan') {
-      return "Akun ini menggunakan fingerprint, tidak bisa absen via Web Absen. Hubungi HRD.";
+    if (user.attendanceMethod === 'fingerprint') {
+      return "Akun Anda menggunakan absensi fingerprint. Web absen tidak tersedia untuk akun ini.";
     }
-    if (!user.employmentType) {
-      return "Status kepegawaian tidak terdeteksi. Hubungi HRD.";
+    if (!user.attendanceMethod) {
+      return "Metode absensi Anda belum diatur oleh HRD. Silakan hubungi HRD.";
     }
     return null;
   }, [user]);
@@ -173,6 +182,49 @@ export default function AbsenPage() {
     }
   }, [location, sites]);
 
+  // HELPER: Hitung date range berdasarkan filter aktif
+  const getDateRangeForFilter = useCallback((): [Date, Date] => {
+    const now = new Date();
+    let start: Date, end: Date;
+
+    if (historyFilterMode === 'quick') {
+      end = new Date(now);
+      switch (selectedQuickFilter) {
+        case 'today':
+          start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+          break;
+        case 'week':
+          start = new Date(now);
+          start.setDate(now.getDate() - now.getDay());
+          break;
+        case 'month':
+          start = new Date(now.getFullYear(), now.getMonth(), 1);
+          break;
+        case 'year':
+          start = new Date(now.getFullYear(), 0, 1);
+          break;
+        default:
+          start = new Date(now.getFullYear(), now.getMonth(), 1);
+      }
+    } else if (historyFilterMode === 'custom') {
+      start = customStartDate ? new Date(customStartDate) : new Date(now.getFullYear(), now.getMonth(), 1);
+      end = customEndDate ? new Date(customEndDate) : now;
+    } else {
+      // month mode
+      const [year, month] = selectedMonth.split('-').map(Number);
+      start = new Date(year, month - 1, 1);
+      end = new Date(year, month, 0);
+    }
+
+    // Ensure start is at 00:00 and end is at 23:59
+    start.setHours(0, 0, 0, 0);
+    end.setHours(23, 59, 59, 999);
+
+    return [start, end];
+  }, [historyFilterMode, selectedQuickFilter, customStartDate, customEndDate, selectedMonth]);
+
+  const [filterStartDate, filterEndDate] = useMemo(() => getDateRangeForFilter(), [getDateRangeForFilter]);
+
   const historyQuery = useMemo(() => {
     if (!user?.uid || !isAttendanceAllowed) return null;
     return query(
@@ -191,6 +243,68 @@ export default function AbsenPage() {
       return tb - ta;
     });
   }, [rawEvents]);
+
+  // FILTER events berdasarkan date range dan status
+  const filteredHistoryEvents = useMemo(() => {
+    let filtered = sortedEvents.filter((ev: any) => {
+      const evDate = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
+      const isInRange = evDate >= filterStartDate && evDate <= filterEndDate;
+      const statusMatch = statusFilter === 'all' || ev.status === statusFilter;
+      return isInRange && statusMatch;
+    });
+    return filtered;
+  }, [sortedEvents, filterStartDate, filterEndDate, statusFilter]);
+
+  // CALCULATE summary untuk periode yang dipilih
+  const historySummary = useMemo(() => {
+    const summary = {
+      totalRecords: 0,
+      hadir: 0,
+      terlambat: 0,
+      pulangAwal: 0,
+      belumTapOut: 0,
+      totalHours: 0
+    };
+
+    const tapInMap: Record<string, any> = {};
+    filteredHistoryEvents.forEach((ev: any) => {
+      const dateKey = format(ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient), 'yyyy-MM-dd');
+      if (ev.type === 'IN') {
+        tapInMap[dateKey] = ev;
+      } else if (ev.type === 'OUT' && tapInMap[dateKey]) {
+        const inTime = tapInMap[dateKey].tsClient instanceof Timestamp ? tapInMap[dateKey].tsClient.toDate() : new Date(tapInMap[dateKey].tsClient);
+        const outTime = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
+        const hours = (outTime.getTime() - inTime.getTime()) / (1000 * 60 * 60);
+        summary.totalHours += hours;
+      }
+    });
+
+    filteredHistoryEvents.forEach((ev: any) => {
+      if (ev.type === 'IN') {
+        summary.totalRecords++;
+        if (ev.status === 'LATE') {
+          summary.terlambat++;
+        } else if (ev.status === 'ON_TIME') {
+          summary.hadir++;
+        }
+      }
+      if (ev.status === 'EARLY_LEAVE') {
+        summary.pulangAwal++;
+      }
+    });
+
+    // Hitung belum tap out (ada IN tapi tidak ada OUT di hari yang sama)
+    const daysWithIn = new Set<string>();
+    const daysWithOut = new Set<string>();
+    filteredHistoryEvents.forEach((ev: any) => {
+      const dateKey = format(ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient), 'yyyy-MM-dd');
+      if (ev.type === 'IN') daysWithIn.add(dateKey);
+      if (ev.type === 'OUT') daysWithOut.add(dateKey);
+    });
+    summary.belumTapOut = daysWithIn.size - Array.from(daysWithIn).filter(d => daysWithOut.has(d)).length;
+
+    return summary;
+  }, [filteredHistoryEvents]);
 
   const todayStatus = useMemo(() => {
     const todayStr = format(new Date(), 'yyyy-MM-dd');
@@ -382,19 +496,36 @@ export default function AbsenPage() {
   return (
     <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto relative shadow-2xl border-x">
       <div className="flex-1 overflow-auto pb-20">
+        {!user?.employeeProfileFound && user?.email && (
+          <div className="bg-yellow-50 border-b border-yellow-200 p-3">
+            <div className="flex items-start gap-2 text-[10px]">
+              <AlertTriangle className="w-4 h-4 text-yellow-600 shrink-0 mt-0.5" />
+              <div>
+                <p className="font-bold text-yellow-800">Data Profil Tidak Ditemukan</p>
+                <p className="text-yellow-700 text-[9px] mt-0.5">Data karyawan Anda belum terdaftar di sistem HRP. Silakan hubungi HRD untuk melengkapi data profil.</p>
+              </div>
+            </div>
+          </div>
+        )}
         <div className="p-4 flex justify-between items-center bg-white/90 backdrop-blur-md sticky top-0 z-10 border-b">
           <div className="flex items-center gap-3">
             <Avatar className="w-10 h-10 ring-2 ring-primary/5">
               <AvatarFallback className="bg-primary text-white font-bold">{user?.displayName?.[0]}</AvatarFallback>
             </Avatar>
-            <div>
+            <div className="space-y-0.5">
               <h1 className="font-bold text-sm leading-tight">{user?.displayName}</h1>
-              <p className="text-[9px] text-muted-foreground uppercase font-black tracking-widest">{user?.brandName}</p>
+              <div className="text-[8px] text-muted-foreground space-y-0.5">
+                <p className="uppercase font-black tracking-widest">{user?.brandName || "Brand belum diatur"}</p>
+                {user?.division && <p className="text-[7px]">📍 {user.division}</p>}
+                <p className="font-mono text-[7px] text-primary font-bold">
+                  🆔 {user?.employeeId || "ID belum diatur"}
+                </p>
+              </div>
             </div>
           </div>
           <div className="flex items-center gap-1">
-            {user?.employmentType && (
-              <Badge variant="outline" className="text-[8px] h-5 uppercase px-2 bg-muted/30">{user.employmentType}</Badge>
+            {user?.attendanceMethod && (
+              <Badge variant="outline" className="text-[8px] h-5 uppercase px-2 bg-muted/30">{user.attendanceMethod.replace('_', ' ')}</Badge>
             )}
             <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="rounded-full">
               <LogOut className="w-5 h-5" />
@@ -556,38 +687,187 @@ export default function AbsenPage() {
             </div>
           </TabsContent>
 
-          <TabsContent value="history" className="p-4">
-             <div className="space-y-4">
-              <h3 className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Log Absensi Terbaru</h3>
-              <div className="space-y-3">
-                {!isAttendanceAllowed ? (
-                   <div className="py-12 flex flex-col items-center gap-3 text-muted-foreground opacity-50">
-                     <FileText className="w-8 h-8" />
-                     <p className="text-xs italic">Log riwayat tidak tersedia.</p>
-                   </div>
-                ) : eventsLoading ? <Loader2 className="w-6 h-6 animate-spin mx-auto opacity-20" /> :
-                 sortedEvents.map((ev: any, i: number) => {
-                  const dt = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date();
-                  return (
-                    <div key={i} className="bg-white p-4 rounded-3xl border shadow-sm">
-                      <div className="flex justify-between items-start mb-2">
-                        <div>
-                          <p className="text-[10px] font-bold text-muted-foreground mb-0.5">{format(dt, 'EEEE, dd MMM yyyy', { locale: localeId })}</p>
-                          <p className="text-xs font-black uppercase tracking-tight">TAP {ev.type} • {ev.siteName}</p>
-                        </div>
-                        <Badge variant="outline" className={`text-[9px] rounded-full px-3 ${ev.status === 'LATE' ? 'border-red-200 text-red-600 bg-red-50' : 'border-green-200 text-green-600 bg-green-50'}`}>
-                          {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : 'TEPAT WAKTU'}
-                        </Badge>
-                      </div>
-                      <div className="flex items-start gap-2 mt-2">
-                        <MapPin className="w-3 h-3 text-muted-foreground mt-0.5 shrink-0" />
-                        <span className="text-[10px] text-muted-foreground leading-tight">{ev.address || 'Alamat tidak tercatat'}</span>
-                      </div>
-                    </div>
-                  );
-                })}
+          <TabsContent value="history" className="p-4 space-y-4">
+            <h3 className="text-[10px] font-black uppercase tracking-widest text-muted-foreground">Riwayat Absensi</h3>
+
+            {!isAttendanceAllowed ? (
+              <div className="py-12 flex flex-col items-center gap-3 text-muted-foreground opacity-50">
+                <FileText className="w-8 h-8" />
+                <p className="text-xs italic">Riwayat tidak tersedia untuk akun ini.</p>
               </div>
-            </div>
+            ) : (
+              <>
+                {/* FILTER UI */}
+                <div className="space-y-3 bg-white p-3 rounded-2xl border shadow-sm">
+                  {/* Filter Mode Selector */}
+                  <div className="flex gap-2">
+                    <Button
+                      size="sm"
+                      variant={historyFilterMode === 'quick' ? 'default' : 'outline'}
+                      onClick={() => setHistoryFilterMode('quick')}
+                      className="text-[9px] h-7 px-2"
+                    >
+                      Cepat
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={historyFilterMode === 'custom' ? 'default' : 'outline'}
+                      onClick={() => setHistoryFilterMode('custom')}
+                      className="text-[9px] h-7 px-2"
+                    >
+                      Tanggal
+                    </Button>
+                    <Button
+                      size="sm"
+                      variant={historyFilterMode === 'month' ? 'default' : 'outline'}
+                      onClick={() => setHistoryFilterMode('month')}
+                      className="text-[9px] h-7 px-2"
+                    >
+                      Bulan
+                    </Button>
+                  </div>
+
+                  {/* Quick Filters */}
+                  {historyFilterMode === 'quick' && (
+                    <div className="grid grid-cols-2 gap-2">
+                      {(['today', 'week', 'month', 'year'] as const).map(filter => (
+                        <Button
+                          key={filter}
+                          size="sm"
+                          variant={selectedQuickFilter === filter ? 'default' : 'outline'}
+                          onClick={() => setSelectedQuickFilter(filter)}
+                          className="text-[9px] h-7"
+                        >
+                          {filter === 'today' && 'Hari Ini'}
+                          {filter === 'week' && 'Minggu Ini'}
+                          {filter === 'month' && 'Bulan Ini'}
+                          {filter === 'year' && 'Tahun Ini'}
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Custom Date Range */}
+                  {historyFilterMode === 'custom' && (
+                    <div className="grid grid-cols-2 gap-2">
+                      <input
+                        type="date"
+                        value={customStartDate}
+                        onChange={(e) => setCustomStartDate(e.target.value)}
+                        className="text-[9px] h-7 px-2 rounded border"
+                      />
+                      <input
+                        type="date"
+                        value={customEndDate}
+                        onChange={(e) => setCustomEndDate(e.target.value)}
+                        className="text-[9px] h-7 px-2 rounded border"
+                      />
+                    </div>
+                  )}
+
+                  {/* Month Picker */}
+                  {historyFilterMode === 'month' && (
+                    <input
+                      type="month"
+                      value={selectedMonth}
+                      onChange={(e) => setSelectedMonth(e.target.value)}
+                      className="text-[9px] h-7 px-2 rounded border w-full"
+                    />
+                  )}
+
+                  {/* Status Filter */}
+                  <div>
+                    <label className="text-[9px] font-bold text-muted-foreground block mb-1">Status</label>
+                    <select
+                      value={statusFilter}
+                      onChange={(e) => setStatusFilter(e.target.value)}
+                      className="w-full text-[9px] h-7 px-2 rounded border bg-white"
+                    >
+                      <option value="all">Semua Status</option>
+                      <option value="ON_TIME">Hadir</option>
+                      <option value="LATE">Terlambat</option>
+                      <option value="EARLY_LEAVE">Pulang Awal</option>
+                      <option value="NORMAL">Normal</option>
+                    </select>
+                  </div>
+                </div>
+
+                {/* SUMMARY CARDS */}
+                {eventsLoading ? (
+                  <div className="flex justify-center py-8">
+                    <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <Card className="border-none shadow-sm rounded-2xl bg-green-50">
+                        <CardContent className="pt-3 pb-2 text-center">
+                          <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Hadir</p>
+                          <p className="text-lg font-black text-green-600">{historySummary.hadir}</p>
+                        </CardContent>
+                      </Card>
+                      <Card className="border-none shadow-sm rounded-2xl bg-red-50">
+                        <CardContent className="pt-3 pb-2 text-center">
+                          <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Terlambat</p>
+                          <p className="text-lg font-black text-red-600">{historySummary.terlambat}</p>
+                        </CardContent>
+                      </Card>
+                      <Card className="border-none shadow-sm rounded-2xl bg-orange-50">
+                        <CardContent className="pt-3 pb-2 text-center">
+                          <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Pulang Awal</p>
+                          <p className="text-lg font-black text-orange-600">{historySummary.pulangAwal}</p>
+                        </CardContent>
+                      </Card>
+                      <Card className="border-none shadow-sm rounded-2xl bg-yellow-50">
+                        <CardContent className="pt-3 pb-2 text-center">
+                          <p className="text-[9px] text-muted-foreground font-bold uppercase mb-1">Belum Tap Out</p>
+                          <p className="text-lg font-black text-yellow-600">{historySummary.belumTapOut}</p>
+                        </CardContent>
+                      </Card>
+                    </div>
+
+                    {/* HISTORY LIST */}
+                    <div className="space-y-3">
+                      {filteredHistoryEvents.length === 0 ? (
+                        <div className="py-12 flex flex-col items-center gap-3 text-muted-foreground opacity-50">
+                          <FileText className="w-8 h-8" />
+                          <p className="text-xs italic">Belum ada riwayat absensi pada periode ini.</p>
+                        </div>
+                      ) : (
+                        filteredHistoryEvents.map((ev: any, i: number) => {
+                          const dt = ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date(ev.tsClient);
+                          const statusColor = ev.status === 'LATE' ? 'bg-red-50 text-red-600 border-red-200' : ev.status === 'EARLY_LEAVE' ? 'bg-orange-50 text-orange-600 border-orange-200' : 'bg-green-50 text-green-600 border-green-200';
+                          return (
+                            <div key={i} className="bg-white p-3 rounded-2xl border shadow-sm">
+                              <div className="flex justify-between items-start mb-2">
+                                <div>
+                                  <p className="text-[9px] font-bold text-muted-foreground mb-0.5">{format(dt, 'EEEE, dd MMM yyyy', { locale: localeId })}</p>
+                                  <p className="text-[10px] font-black uppercase tracking-tight">
+                                    {ev.type === 'IN' ? '📍 Tap Masuk' : '🚪 Tap Keluar'} • {format(dt, 'HH:mm')}
+                                  </p>
+                                </div>
+                                <Badge variant="outline" className={`text-[8px] rounded-full px-2 py-0.5 h-auto border ${statusColor}`}>
+                                  {ev.status === 'LATE' ? `TERLAMBAT (${ev.lateMinutes}m)` : ev.status === 'EARLY_LEAVE' ? 'PULANG AWAL' : 'TEPAT WAKTU'}
+                                </Badge>
+                              </div>
+                              <div className="flex items-start gap-2 mt-2 text-[9px] text-muted-foreground">
+                                <MapPin className="w-3 h-3 mt-0.5 shrink-0" />
+                                <span className="leading-tight">{ev.siteName || ev.address || 'Lokasi tidak tercatat'}</span>
+                              </div>
+                              {ev.flags?.includes('OFFSITE') && (
+                                <div className="mt-2 text-[8px] text-orange-600 bg-orange-50 px-2 py-1 rounded-lg inline-block">
+                                  ⚠️ OFFSITE
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })
+                      )}
+                    </div>
+                  </>
+                )}
+              </>
+            )}
           </TabsContent>
         </Tabs>
       </div>
