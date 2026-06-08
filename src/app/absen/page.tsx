@@ -100,6 +100,23 @@ function shortAddr(a: AddressDetail): string {
     .join(", ");
 }
 
+// Firestore tidak boleh simpan undefined — convert ke null atau hapus
+function cleanUndefined(value: any): any {
+  if (Array.isArray(value)) {
+    return value.map(cleanUndefined);
+  }
+
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(
+      Object.entries(value)
+        .filter(([_, v]) => v !== undefined)
+        .map(([k, v]) => [k, cleanUndefined(v)])
+    );
+  }
+
+  return value;
+}
+
 function formatAddressLines(a: AddressDetail): string[] {
   if (!a) return [];
   const lines: string[] = [];
@@ -350,8 +367,15 @@ export default function AbsenPage() {
   const todayStatus = useMemo(() => {
     const todayStr = format(new Date(), "yyyy-MM-dd");
     const events = sortedEvents.filter((ev: any) => {
-      const d =
-        ev.tsClient instanceof Timestamp ? ev.tsClient.toDate() : new Date();
+      let d: Date | null = null;
+      try {
+        d = ev.tsClient instanceof Timestamp
+          ? ev.tsClient.toDate()
+          : ev.tsClient ? new Date(ev.tsClient) : new Date();
+        if (d && isNaN(d.getTime())) d = new Date();
+      } catch {
+        d = new Date();
+      }
       return format(d, "yyyy-MM-dd") === todayStr;
     });
     return {
@@ -364,24 +388,36 @@ export default function AbsenPage() {
   const todayCheckIn = useMemo<any | null>(() => {
     const ev = todayStatus.events.find((e: any) => e.type === "IN");
     if (!ev) return null;
+    let dt: Date | null = null;
+    try {
+      dt = ev.tsClient instanceof Timestamp
+        ? ev.tsClient.toDate()
+        : ev.tsClient ? new Date(ev.tsClient) : null;
+      if (dt && isNaN(dt.getTime())) dt = null;
+    } catch {
+      dt = null;
+    }
     return {
       ...ev,
-      _date:
-        ev.tsClient instanceof Timestamp
-          ? ev.tsClient.toDate()
-          : new Date(ev.tsClient),
+      _date: dt || new Date(),
     };
   }, [todayStatus.events]);
 
   const todayCheckOut = useMemo<any | null>(() => {
     const ev = todayStatus.events.find((e: any) => e.type === "OUT");
     if (!ev) return null;
+    let dt: Date | null = null;
+    try {
+      dt = ev.tsClient instanceof Timestamp
+        ? ev.tsClient.toDate()
+        : ev.tsClient ? new Date(ev.tsClient) : null;
+      if (dt && isNaN(dt.getTime())) dt = null;
+    } catch {
+      dt = null;
+    }
     return {
       ...ev,
-      _date:
-        ev.tsClient instanceof Timestamp
-          ? ev.tsClient.toDate()
-          : new Date(ev.tsClient),
+      _date: dt || new Date(),
     };
   }, [todayStatus.events]);
 
@@ -437,10 +473,16 @@ export default function AbsenPage() {
   const filteredEvents = useMemo(
     () =>
       sortedEvents.filter((ev: any) => {
-        const d =
-          ev.tsClient instanceof Timestamp
+        let d: Date | null = null;
+        try {
+          d = ev.tsClient instanceof Timestamp
             ? ev.tsClient.toDate()
-            : new Date(ev.tsClient);
+            : ev.tsClient ? new Date(ev.tsClient) : null;
+          if (d && isNaN(d.getTime())) d = null;
+        } catch {
+          d = null;
+        }
+        if (!d) return false;
         return (
           d >= filterStart &&
           d <= filterEnd &&
@@ -454,10 +496,16 @@ export default function AbsenPage() {
   const groupedHistory = useMemo(() => {
     const groups = new Map<string, any[]>();
     filteredEvents.forEach((ev: any) => {
-      const dt =
-        ev.tsClient instanceof Timestamp
+      let dt: Date | null = null;
+      try {
+        dt = ev.tsClient instanceof Timestamp
           ? ev.tsClient.toDate()
-          : new Date(ev.tsClient);
+          : ev.tsClient ? new Date(ev.tsClient) : null;
+        if (dt && isNaN(dt.getTime())) dt = null;
+      } catch {
+        dt = null;
+      }
+      if (!dt) return;
       const key = format(dt, "yyyy-MM-dd");
       if (!groups.has(key)) groups.set(key, []);
       groups.get(key)!.push({ ...ev, _date: dt });
@@ -804,7 +852,29 @@ export default function AbsenPage() {
           }
         : null;
 
-      await addDoc(collection(db, "attendance_events"), {
+      // Explicit map addressDetail untuk menghindari undefined
+      const addressDetailSafe = addr ? {
+        road: addr.road || null,
+        neighbourhood: addr.neighbourhood || null,
+        suburb: addr.suburb || null,
+        village: addr.village || null,
+        kelurahan: addr.kelurahan || null,
+        district: addr.district || null,
+        kecamatan: addr.kecamatan || null,
+        city: addr.city || null,
+        kota: addr.kota || null,
+        kabupatenKota: addr.kabupatenKota || null,
+        county: addr.county || null,
+        regency: addr.regency || null,
+        state: addr.state || null,
+        province: addr.province || null,
+        postcode: addr.postcode || null,
+        country: addr.country || null,
+        displayName: addr.displayName || null,
+      } : null;
+
+      // Payload dengan semua field yang aman (tidak undefined)
+      const payload = cleanUndefined({
         uid: user.uid,
         userName: user.displayName,
         brandId: user.brandId || null,
@@ -830,7 +900,7 @@ export default function AbsenPage() {
             }
           : null,
         address: addr?.displayName || null,
-        addressDetail: addr || null,
+        addressDetail: addressDetailSafe,
         siteId: activeSite?.id || "OFFSITE",
         siteName: activeSite?.name || "Luar Kantor",
         siteSnapshot,
@@ -856,6 +926,8 @@ export default function AbsenPage() {
           submittedAt: Timestamp.fromDate(submittedAt),
         },
       });
+
+      await addDoc(collection(db, "attendance_events"), payload);
       setTapStep("success");
     } catch (err: any) {
       console.error("Submit error:", err);
@@ -1605,10 +1677,16 @@ export default function AbsenPage() {
                 <div className="space-y-2">
                   {sortedEvents && sortedEvents.length > 0 ? (
                     sortedEvents.slice(0, 3).map((ev: any) => {
-                      const dt =
-                        ev.tsClient instanceof Timestamp
+                      let dt: Date | null = null;
+                      try {
+                        dt = ev.tsClient instanceof Timestamp
                           ? ev.tsClient.toDate()
-                          : new Date(ev.tsClient);
+                          : ev.tsClient ? new Date(ev.tsClient) : null;
+                        if (dt && isNaN(dt.getTime())) dt = null;
+                      } catch {
+                        dt = null;
+                      }
+                      if (!dt) return null;
                       return (
                         <div
                           key={ev.id || ev.tsClient}

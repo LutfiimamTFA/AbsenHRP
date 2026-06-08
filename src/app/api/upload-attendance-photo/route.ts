@@ -5,45 +5,12 @@ export const runtime = 'nodejs';
 // Google Apps Script tidak menerima Content-Type: application/json dari server eksternal
 // karena menyebabkan error 405. Gunakan text/plain — body tetap JSON string,
 // Apps Script baca lewat e.postData.contents lalu JSON.parse.
-const GAS_CONTENT_TYPE = 'text/plain;charset=utf-8';
-
 async function postToAppsScript(url: string, payload: object): Promise<Response> {
-  const bodyStr = JSON.stringify(payload);
-
-  // Kirim pertama, jangan auto-follow redirect (POST → GET saat 302)
-  const first = await fetch(url, {
-    method:   'POST',
-    headers:  { 'Content-Type': GAS_CONTENT_TYPE },
-    body:     bodyStr,
-    redirect: 'manual',
-  });
-
-  // Bukan redirect → kembalikan langsung
-  if (first.status < 300 || first.status >= 400) return first;
-
-  // Apps Script /exec sering 302-redirect; ikuti dengan re-POST agar doPost() terpanggil
-  const loc1 = first.headers.get('location');
-  console.log('[upload-attendance] redirect', first.status, '→', loc1);
-  if (!loc1) return first;
-
-  const second = await fetch(loc1, {
-    method:   'POST',
-    headers:  { 'Content-Type': GAS_CONTENT_TYPE },
-    body:     bodyStr,
-    redirect: 'manual',
-  });
-
-  if (second.status < 300 || second.status >= 400) return second;
-
-  // Redirect kedua (sangat jarang) — ikuti sekali lagi
-  const loc2 = second.headers.get('location');
-  if (!loc2) return second;
-
-  return fetch(loc2, {
-    method:   'POST',
-    headers:  { 'Content-Type': GAS_CONTENT_TYPE },
-    body:     bodyStr,
-    redirect: 'follow',
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'text/plain;charset=utf-8' },
+    body: JSON.stringify(payload),
+    redirect: 'follow'
   });
 }
 
@@ -90,7 +57,17 @@ export async function POST(request: NextRequest) {
       base64,
     };
 
+    console.log('[upload-attendance] POST to Apps Script:', {
+      url: scriptUrl,
+      secret: secret ? '***' : 'MISSING',
+      folderId,
+      fileName,
+      mimeType: payload.mimeType,
+      base64Length: base64.length,
+    });
+
     const resp = await postToAppsScript(scriptUrl, payload);
+    console.log('[upload-attendance] Apps Script HTTP response:', resp.status, resp.statusText);
 
     // HTTP error spesifik
     if (resp.status === 401) {
@@ -125,8 +102,9 @@ export async function POST(request: NextRequest) {
     }
 
     const data = await resp.json();
+    console.log('[upload-attendance] Apps Script response:', JSON.stringify(data, null, 2));
     if (!data.success) {
-      throw new Error(data.error || 'Apps Script: upload gagal.');
+      throw new Error(data.error || `Apps Script: upload gagal. Response: ${JSON.stringify(data)}`);
     }
 
     return NextResponse.json({
