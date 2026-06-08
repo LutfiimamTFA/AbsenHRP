@@ -20,13 +20,11 @@ import {
   serverTimestamp,
   Timestamp,
 } from "firebase/firestore";
-import { getFunctions, httpsCallable } from "firebase/functions";
 import {
   useAuth,
   useFirestore,
   useUser,
   useCollection,
-  useFirebaseApp,
 } from "@/firebase";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -177,7 +175,6 @@ export default function AbsenPage() {
   const { user, loading: userLoading } = useUser();
   const auth = useAuth();
   const db = useFirestore();
-  const firebaseApp = useFirebaseApp();
   const router = useRouter();
   const { toast } = useToast();
 
@@ -760,39 +757,27 @@ export default function AbsenPage() {
         now,
       );
 
-      // Upload watermarked image to Google Drive via HTTP Cloud Function
-      const folderId = "1lPkjD2kw2k9No4kHCuUJ07zOmGwuQ70I";
-      const fileName = `attendance-${user.employeeId || user.uid}-kehadiran_${tapType === "IN" ? "masuk" : "pulang"}-${format(now, "yyyyMMdd-HHmmss")}.jpg`;
-      let fileId: string | null = null;
-      let viewUrl: string | null = null;
-      let downloadUrl: string | null = null;
+      // Upload foto ke Google Drive via Apps Script (tidak pakai Firebase Storage)
+      const ts       = format(now, 'yyyyMMdd-HHmmss');
+      const action   = tapType === 'IN' ? 'masuk' : 'pulang';
+      const idStr    = user.employeeId || user.uid.slice(0, 8);
+      const fileName = `attendance-${idStr}-kehadiran_${action}-${ts}.jpg`;
 
-      // Prefer explicit env var, fallback to deployed Cloud Function URL for project
-      const uploadUrl =
-        process.env.NEXT_PUBLIC_UPLOAD_TO_DRIVE_URL ||
-        "https://us-central1-studio-9262077557-bc9c9.cloudfunctions.net/uploadToDrive";
-      const idToken = await auth.currentUser?.getIdToken();
-      const resp = await fetch(uploadUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${idToken}`,
-        },
-        body: JSON.stringify({
-          fileName,
-          mimeType: "image/jpeg",
-          base64: watermarked,
-          folderId,
-        }),
+      const uploadRes = await fetch('/api/upload-attendance-photo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fileName, mimeType: 'image/jpeg', base64: watermarked }),
       });
-      const data = await resp.json().catch(() => null);
-      if (!resp.ok || !data || data.success !== true) {
-        throw new Error("uploadToDrive");
+      const uploadData = await uploadRes.json().catch(() => null);
+      if (!uploadData?.success) {
+        throw new Error(uploadData?.error || 'Gagal mengunggah foto ke Google Drive. Coba lagi.');
       }
-      fileId = data.fileId || null;
-      viewUrl = data.driveViewUrl || null;
-      downloadUrl = data.driveDownloadUrl || null;
-      const selfieUrl = viewUrl || downloadUrl || null;
+
+      const driveFileId    = uploadData.fileId    || null;
+      const driveViewUrl   = uploadData.viewUrl   || null;
+      const driveDownload  = uploadData.downloadUrl || null;
+      const driveFolderId  = uploadData.folderId  || null;
+      const selfieUrl      = driveViewUrl || driveDownload || null;
 
       const submittedAt = new Date();
       const datetime = {
@@ -854,20 +839,18 @@ export default function AbsenPage() {
         flags,
         photoUrl: selfieUrl,
         evidence: {
-          selfieUrl: selfieUrl,
-          watermarkedSelfieUrl: selfieUrl,
-          driveFileId: fileId || null,
-          driveFolderId: folderId || null,
-          driveViewUrl: viewUrl || null,
-          driveDownloadUrl: downloadUrl || null,
-          storageProvider: "google_drive",
+          selfieUrl,
+          watermarkedSelfieUrl: driveViewUrl,
+          driveFileId:   driveFileId,
+          driveFolderId: driveFolderId,
+          driveViewUrl:  driveViewUrl,
+          driveDownloadUrl: driveDownload,
+          storageProvider: 'google_drive_apps_script',
           watermarked: true,
-          source: "web_absen_hrp",
+          source: 'web_absen_hrp',
           userAgent: navigator.userAgent,
           platform: navigator.platform,
-          deviceType: /Mobi|Android/i.test(navigator.userAgent)
-            ? "mobile"
-            : "desktop",
+          deviceType: /Mobi|Android/i.test(navigator.userAgent) ? 'mobile' : 'desktop',
           locationCapturedAt: gps ? Timestamp.fromDate(gps.capturedAt) : null,
           photoCapturedAt: Timestamp.fromDate(submittedAt),
           submittedAt: Timestamp.fromDate(submittedAt),
@@ -876,9 +859,7 @@ export default function AbsenPage() {
       setTapStep("success");
     } catch (err: any) {
       console.error("Submit error:", err);
-      const msg = /uploadToDrive/i.test(String(err))
-        ? "Gagal mengunggah foto ke Google Drive. Coba lagi."
-        : err.message || "Gagal menyimpan data.";
+      const msg = err.message || "Gagal menyimpan data.";
       toast({
         variant: "destructive",
         title: "Gagal Simpan",
@@ -898,7 +879,6 @@ export default function AbsenPage() {
     calculateStatus,
     applyWatermark,
     db,
-    firebaseApp,
     toast,
   ]);
 
@@ -1789,11 +1769,9 @@ export default function AbsenPage() {
                             checkIn.address
                           : checkIn?.address;
                         const photo =
-                          checkIn?.evidence?.driveViewUrl ||
                           checkIn?.evidence?.watermarkedSelfieUrl ||
                           checkIn?.evidence?.selfieUrl ||
                           checkIn?.photoUrl ||
-                          checkOut?.evidence?.driveViewUrl ||
                           checkOut?.evidence?.watermarkedSelfieUrl ||
                           checkOut?.evidence?.selfieUrl ||
                           checkOut?.photoUrl ||

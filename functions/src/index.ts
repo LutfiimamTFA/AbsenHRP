@@ -167,7 +167,9 @@ export const uploadToDrive = functions
       const payload = (req.body && (req.body.data || req.body)) || {};
       const { fileName, mimeType, base64, folderId } = payload;
       if (!fileName || !base64) {
-        res.status(400).json({ error: "Missing fileName or base64" });
+        res
+          .status(400)
+          .json({ success: false, error: "Missing fileName or base64" });
         return;
       }
 
@@ -175,14 +177,19 @@ export const uploadToDrive = functions
       const authHeader = String(req.get("Authorization") || "");
       const match = authHeader.match(/^Bearer (.*)$/);
       if (!match) {
-        res.status(401).json({ error: "Missing Authorization Bearer token" });
+        res
+          .status(401)
+          .json({
+            success: false,
+            error: "Missing Authorization Bearer token",
+          });
         return;
       }
       const idToken = match[1];
       try {
         await admin.auth().verifyIdToken(idToken);
       } catch (e) {
-        res.status(401).json({ error: "Invalid auth token" });
+        res.status(401).json({ success: false, error: "Invalid auth token" });
         return;
       }
 
