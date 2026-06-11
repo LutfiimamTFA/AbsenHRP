@@ -100,6 +100,24 @@ function shortAddr(a: AddressDetail): string {
     .join(", ");
 }
 
+// Extract Google Drive file ID from various Drive URL formats
+function extractDriveFileId(url: string | null | undefined): string | null {
+  if (!url) return null;
+  let m = url.match(/\/file\/d\/([a-zA-Z0-9_-]+)/);
+  if (m) return m[1];
+  m = url.match(/[?&]id=([a-zA-Z0-9_-]+)/);
+  if (m) return m[1];
+  return null;
+}
+
+// Photo only accessible within 7 days of attendanceDate
+function isPhotoWithin7Days(attendanceDate: string): boolean {
+  try {
+    const d = new Date(attendanceDate + 'T00:00:00');
+    return !isNaN(d.getTime()) && Date.now() - d.getTime() <= 7 * 24 * 60 * 60 * 1000;
+  } catch { return false; }
+}
+
 // Firestore tidak boleh simpan undefined — convert ke null atau hapus.
 // Jangan process Timestamp, Date, atau FieldValue (Firestore special types).
 function cleanUndefined(value: any): any {
@@ -249,6 +267,14 @@ export default function AbsenPage() {
     new Date().toISOString().slice(0, 7),
   );
   const [statusFilter, setStatusFilter] = useState("all");
+
+  // Photo modal state
+  const [photoModal, setPhotoModal] = useState<{
+    fileId: string;
+    date: string;
+    dateLabel: string;
+    checkInTime: string | null;
+  } | null>(null);
 
   // ── Access control ─────────────────────────────────────────────
   const isAttendanceAllowed = useMemo(
@@ -564,12 +590,22 @@ export default function AbsenPage() {
           if (diff > 0) durationMinutes = Math.floor(diff / 60000);
         }
 
+        // Bandingkan dengan hari ini dalam WIB (UTC+7) — tanggal berjalan tidak boleh dianggap "lupa"
+        const todayWIB = new Date(Date.now() + 7 * 60 * 60 * 1000).toISOString().slice(0, 10);
+        const isPast   = date < todayWIB;
+
         // Daily status
-        let dailyStatus: "COMPLETE" | "MISSING_OUT" | "MISSING_IN" | "ABSENT";
-        if (checkIn && checkOut) dailyStatus = "COMPLETE";
-        else if (checkIn && !checkOut) dailyStatus = "MISSING_OUT";
-        else if (!checkIn && checkOut) dailyStatus = "MISSING_IN";
-        else dailyStatus = "ABSENT";
+        let dailyStatus: "COMPLETE" | "MISSING_OUT" | "MISSING_IN" | "ABSENT" | "IN_PROGRESS";
+        if (checkIn && checkOut) {
+          dailyStatus = "COMPLETE";
+        } else if (checkIn && !checkOut) {
+          // Masih punya waktu pulang jika hari ini belum selesai
+          dailyStatus = isPast ? "MISSING_OUT" : "IN_PROGRESS";
+        } else if (!checkIn && checkOut) {
+          dailyStatus = isPast ? "MISSING_IN" : "IN_PROGRESS";
+        } else {
+          dailyStatus = "ABSENT";
+        }
 
         return {
           date,
@@ -586,13 +622,14 @@ export default function AbsenPage() {
   // Apply statusFilter pada grouped history
   const filteredGroups = useMemo(() => {
     if (statusFilter === "all") return groupedHistory;
-    return groupedHistory.filter(({ checkIn, checkOut }) => {
+    return groupedHistory.filter(({ checkIn, checkOut, dailyStatus }) => {
       switch (statusFilter) {
-        case "COMPLETE":     return !!(checkIn && checkOut);
+        case "COMPLETE":     return dailyStatus === "COMPLETE";
         case "LATE":         return checkIn?.status === "LATE";
         case "EARLY_LEAVE":  return checkOut?.status === "EARLY_LEAVE";
-        case "MISSING_OUT":  return !!(checkIn && !checkOut);
-        case "MISSING_IN":   return !!(!checkIn && checkOut);
+        // Hanya tampilkan tanggal lampau — hari ini yang belum pulang bukan "lupa"
+        case "MISSING_OUT":  return dailyStatus === "MISSING_OUT";
+        case "MISSING_IN":   return dailyStatus === "MISSING_IN";
         default:             return true;
       }
     });
@@ -602,11 +639,12 @@ export default function AbsenPage() {
   const historySummary = useMemo(() => {
     let totalPresent = 0, totalLate = 0, totalEarlyLeave = 0,
         totalMissingOut = 0, totalWorkMinutes = 0;
-    groupedHistory.forEach(({ checkIn, checkOut, durationMinutes }) => {
+    groupedHistory.forEach(({ checkIn, checkOut, dailyStatus, durationMinutes }) => {
       if (checkIn) totalPresent++;
       if (checkIn?.status === "LATE") totalLate++;
       if (checkOut?.status === "EARLY_LEAVE") totalEarlyLeave++;
-      if (checkIn && !checkOut) totalMissingOut++;
+      // Hanya hitung sebagai lupa jika status benar-benar MISSING_OUT (tanggal lampau)
+      if (dailyStatus === "MISSING_OUT") totalMissingOut++;
       if (durationMinutes) totalWorkMinutes += durationMinutes;
     });
     return { totalPresent, totalLate, totalEarlyLeave, totalMissingOut, totalWorkMinutes };
@@ -1863,65 +1901,55 @@ export default function AbsenPage() {
             ) : (
               <>
                 {/* Filters */}
-                <div className="bg-white rounded-2xl border shadow-sm p-3 space-y-3">
-                  <div className="flex gap-2">
+                <div className="bg-white rounded-2xl border shadow-sm p-3 space-y-2">
+                  {/* Period mode tabs */}
+                  <div className="flex items-center gap-1 p-0.5 bg-muted/40 rounded-xl">
                     {(["quick", "custom", "month"] as const).map((m) => (
-                      <Button
+                      <button
                         key={m}
-                        size="sm"
-                        variant={
-                          historyFilterMode === m ? "default" : "outline"
-                        }
                         onClick={() => setHistoryFilterMode(m)}
-                        className="text-[9px] h-7 px-2.5 flex-1"
+                        className={`flex-1 text-[8px] font-bold h-6 rounded-[9px] transition-colors ${
+                          historyFilterMode === m
+                            ? "bg-white shadow-sm text-foreground"
+                            : "text-muted-foreground"
+                        }`}
                       >
-                        {m === "quick"
-                          ? "Cepat"
-                          : m === "custom"
-                            ? "Tanggal"
-                            : "Bulan"}
-                      </Button>
+                        {m === "quick" ? "Cepat" : m === "custom" ? "Rentang" : "Bulan"}
+                      </button>
                     ))}
                   </div>
 
                   {historyFilterMode === "quick" && (
-                    <div className="grid grid-cols-2 gap-2">
-                      {(["today", "week", "month", "year"] as const).map(
-                        (f) => (
-                          <Button
-                            key={f}
-                            size="sm"
-                            variant={
-                              selectedQuickFilter === f ? "default" : "outline"
-                            }
-                            onClick={() => setSelectedQuickFilter(f)}
-                            className="text-[9px] h-7"
-                          >
-                            {f === "today"
-                              ? "Hari Ini"
-                              : f === "week"
-                                ? "Minggu Ini"
-                                : f === "month"
-                                  ? "Bulan Ini"
-                                  : "Tahun Ini"}
-                          </Button>
-                        ),
-                      )}
+                    <div className="flex gap-1">
+                      {(["today", "week", "month", "year"] as const).map((f) => (
+                        <button
+                          key={f}
+                          onClick={() => setSelectedQuickFilter(f)}
+                          className={`flex-1 text-[8px] font-bold h-6 rounded-lg transition-colors ${
+                            selectedQuickFilter === f
+                              ? "bg-primary/10 text-primary border border-primary/25"
+                              : "text-muted-foreground border border-transparent"
+                          }`}
+                        >
+                          {f === "today" ? "Hari ini" : f === "week" ? "Minggu" : f === "month" ? "Bulan" : "Tahun"}
+                        </button>
+                      ))}
                     </div>
                   )}
                   {historyFilterMode === "custom" && (
-                    <div className="grid grid-cols-2 gap-2">
+                    <div className="flex items-center gap-1.5">
                       <input
                         type="date"
                         value={customStartDate}
                         onChange={(e) => setCustomStartDate(e.target.value)}
-                        className="text-[9px] h-7 px-2 rounded-lg border bg-white"
+                        className="flex-1 text-[9px] h-7 px-2 rounded-lg border bg-white"
                       />
+                      <span className="text-[8px] text-muted-foreground shrink-0">–</span>
                       <input
                         type="date"
                         value={customEndDate}
                         onChange={(e) => setCustomEndDate(e.target.value)}
-                        className="text-[9px] h-7 px-2 rounded-lg border bg-white"
+                        className="flex-1 text-[9px] h-7 px-2 rounded-lg border bg-white"
                       />
                     </div>
                   )}
@@ -1934,17 +1962,18 @@ export default function AbsenPage() {
                     />
                   )}
 
+                  {/* Status filter */}
                   <select
                     value={statusFilter}
                     onChange={(e) => setStatusFilter(e.target.value)}
-                    className="w-full text-[9px] h-7 px-2 rounded-lg border bg-white"
+                    className="w-full text-[9px] h-7 px-2 rounded-lg border bg-white text-muted-foreground"
                   >
-                    <option value="all">Semua Status</option>
-                    <option value="COMPLETE">Selesai (IN + OUT)</option>
-                    <option value="LATE">Terlambat</option>
-                    <option value="EARLY_LEAVE">Pulang Awal</option>
-                    <option value="MISSING_OUT">Lupa Absen Pulang</option>
-                    <option value="MISSING_IN">Lupa Absen Masuk</option>
+                    <option value="all">Semua status</option>
+                    <option value="COMPLETE">Lengkap (masuk + pulang)</option>
+                    <option value="LATE">Terlambat masuk</option>
+                    <option value="EARLY_LEAVE">Pulang awal</option>
+                    <option value="MISSING_OUT">Lupa absen pulang</option>
+                    <option value="MISSING_IN">Lupa absen masuk</option>
                   </select>
                 </div>
 
@@ -2014,15 +2043,19 @@ export default function AbsenPage() {
                           const addrOut = checkOut?.addressDetail
                             ? shortAddr(checkOut.addressDetail as AddressDetail) || checkOut.address
                             : checkOut?.address || null;
-                          const photo = checkIn?.evidence?.watermarkedSelfieUrl
-                            || checkIn?.evidence?.driveViewUrl
-                            || checkIn?.evidence?.selfieUrl
-                            || checkIn?.photoUrl
+
+                          // Resolve Drive fileId: prefer explicit field, fall back to extracting from URL
+                          const driveFileId = checkIn?.evidence?.driveFileId
+                            || extractDriveFileId(checkIn?.evidence?.driveViewUrl)
+                            || extractDriveFileId(checkIn?.evidence?.selfieUrl)
+                            || extractDriveFileId(checkIn?.photoUrl)
                             || null;
+                          const photoAccessible = driveFileId ? isPhotoWithin7Days(date) : false;
 
                           const dailyBadge = (() => {
                             switch (dailyStatus) {
                               case "COMPLETE":    return { label: "Selesai",           cls: "bg-green-100 text-green-700" };
+                              case "IN_PROGRESS": return { label: "Belum Pulang",      cls: "bg-blue-100 text-blue-700" };
                               case "MISSING_OUT": return { label: "Lupa Absen Pulang", cls: "bg-orange-100 text-orange-700" };
                               case "MISSING_IN":  return { label: "Lupa Absen Masuk",  cls: "bg-red-100 text-red-700" };
                               default:            return { label: "Tidak Lengkap",     cls: "bg-gray-100 text-gray-600" };
@@ -2062,12 +2095,10 @@ export default function AbsenPage() {
                                       </p>
                                     </div>
                                   </div>
-                                  {checkIn ? (
+                                  {checkIn && (
                                     <Badge className={`text-[7px] border-none shrink-0 ${statusBadgeCls(checkIn.status)}`}>
                                       {statusLabel(checkIn)}
                                     </Badge>
-                                  ) : (
-                                    <Badge className="text-[7px] border-none bg-gray-100 text-gray-500">Tidak ada</Badge>
                                   )}
                                 </div>
 
@@ -2085,12 +2116,10 @@ export default function AbsenPage() {
                                       </p>
                                     </div>
                                   </div>
-                                  {checkOut ? (
+                                  {checkOut && (
                                     <Badge className={`text-[7px] border-none shrink-0 ${statusBadgeCls(checkOut.status)}`}>
                                       {statusLabel(checkOut)}
                                     </Badge>
-                                  ) : (
-                                    <Badge className="text-[7px] border-none bg-gray-100 text-gray-500">Tidak ada</Badge>
                                   )}
                                 </div>
 
@@ -2124,16 +2153,20 @@ export default function AbsenPage() {
                                   </div>
                                 )}
 
-                                {/* Foto bukti masuk */}
-                                {photo && (
-                                  <a
-                                    href={photo}
-                                    target="_blank"
-                                    rel="noreferrer"
-                                    className="flex items-center justify-center gap-1.5 py-2 px-3 bg-primary/10 text-primary rounded-xl text-[9px] font-bold border border-primary/20 hover:bg-primary/20 transition-colors"
-                                  >
-                                    <Camera className="w-3 h-3" /> Lihat Bukti Foto Masuk
-                                  </a>
+                                {/* Foto bukti masuk — link kecil, hanya ≤7 hari */}
+                                {driveFileId && (
+                                  photoAccessible ? (
+                                    <button
+                                      onClick={() => setPhotoModal({ fileId: driveFileId, date, dateLabel, checkInTime: checkIn ? format(checkIn._date, "HH:mm") : null })}
+                                      className="flex items-center gap-1 text-[8px] text-primary font-semibold underline underline-offset-2 hover:text-primary/70 transition-colors"
+                                    >
+                                      <Camera className="w-2.5 h-2.5 shrink-0" /> Lihat foto masuk
+                                    </button>
+                                  ) : (
+                                    <p className="text-[8px] text-muted-foreground italic flex items-center gap-1">
+                                      <Camera className="w-2.5 h-2.5 shrink-0 opacity-40" /> Foto bukti sudah kedaluwarsa (&gt;7 hari)
+                                    </p>
+                                  )
                                 )}
                               </div>
                             </div>
@@ -2148,6 +2181,60 @@ export default function AbsenPage() {
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* ── Photo modal ───────────────────────────────────────────────────────── */}
+      {photoModal && (
+        <div
+          className="fixed inset-0 z-50 bg-black/70 flex items-end justify-center"
+          onClick={() => setPhotoModal(null)}
+        >
+          <div
+            className="bg-white w-full max-w-md rounded-t-3xl overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Modal header */}
+            <div className="flex items-center justify-between px-4 py-3 border-b">
+              <div>
+                <p className="text-xs font-bold">Foto Bukti Masuk</p>
+                <p className="text-[9px] text-muted-foreground">
+                  {photoModal.dateLabel}
+                  {photoModal.checkInTime ? ` · ${photoModal.checkInTime} WIB` : ""}
+                </p>
+              </div>
+              <button
+                onClick={() => setPhotoModal(null)}
+                className="p-1.5 rounded-full hover:bg-muted transition-colors"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* Image */}
+            <div className="bg-black flex items-center justify-center min-h-[200px]">
+              <img
+                src={`/api/attendance-photo?fileId=${encodeURIComponent(photoModal.fileId)}&date=${encodeURIComponent(photoModal.date)}`}
+                alt="Foto bukti masuk"
+                className="w-full max-h-[60vh] object-contain"
+                onError={(e) => {
+                  const el = e.currentTarget;
+                  el.style.display = "none";
+                  el.parentElement!.insertAdjacentHTML(
+                    "beforeend",
+                    '<p class="text-white text-xs p-6 text-center opacity-70">Foto tidak dapat dimuat.</p>'
+                  );
+                }}
+              />
+            </div>
+
+            {/* Footer note */}
+            <div className="px-4 py-3 bg-muted/20">
+              <p className="text-[9px] text-muted-foreground text-center">
+                Foto bukti hanya tersedia dalam 7 hari sejak tanggal absen.
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
