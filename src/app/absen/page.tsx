@@ -168,8 +168,12 @@ const FLAG_LABELS: Record<string, { label: string; color: string }> = {
 
 // ─── Step pills ───────────────────────────────────────────────────────────────
 
-function StepPills({ current }: { current: 0 | 1 | 2 | 3 }) {
-  const steps = ["Lokasi", "Foto", "Preview", "Kirim"];
+function StepPills({ current, isOut = false }: { current: number; isOut?: boolean }) {
+  // IN: Lokasi → Foto → Preview → Kirim
+  // OUT: Lokasi → Konfirmasi → Kirim
+  const steps = isOut
+    ? ["Lokasi", "Konfirmasi", "Kirim"]
+    : ["Lokasi", "Foto", "Preview", "Kirim"];
   return (
     <div className="flex items-center gap-1.5 text-[8px] font-bold uppercase justify-center py-3">
       {steps.map((label, i) => (
@@ -185,7 +189,7 @@ function StepPills({ current }: { current: 0 | 1 | 2 | 3 }) {
           >
             {i < current ? "✓" : label}
           </span>
-          {i < 3 && <span className="opacity-20">›</span>}
+          {i < steps.length - 1 && <span className="opacity-20">›</span>}
         </React.Fragment>
       ))}
     </div>
@@ -373,14 +377,20 @@ export default function AbsenPage() {
   const todayStatus = useMemo(() => {
     const todayStr = format(new Date(), "yyyy-MM-dd");
     const events = sortedEvents.filter((ev: any) => {
+      // Prioritas: attendanceDate (disimpan sejak update ini), fallback ke tsClient
+      if (ev.attendanceDate && typeof ev.attendanceDate === "string") {
+        return ev.attendanceDate === todayStr;
+      }
+      // Fallback: parse tsClient — JANGAN default ke new Date() jika tidak valid
+      if (!ev.tsClient) return false;
       let d: Date;
       try {
         d = ev.tsClient instanceof Timestamp
           ? ev.tsClient.toDate()
-          : ev.tsClient ? new Date(ev.tsClient) : new Date();
-        if (isNaN(d.getTime())) d = new Date();
+          : new Date(ev.tsClient);
+        if (isNaN(d.getTime())) return false;
       } catch {
-        d = new Date();
+        return false;
       }
       return format(d, "yyyy-MM-dd") === todayStr;
     });
@@ -476,58 +486,131 @@ export default function AbsenPage() {
     [getDateRange],
   );
 
+  // Ambil tanggal dari event dengan semua fallback field (support data lama)
+  const getEventDate = useCallback((ev: any): Date | null => {
+    try {
+      let d: Date | null = null;
+      if (ev.attendanceDate && typeof ev.attendanceDate === "string")
+        d = new Date(ev.attendanceDate + "T00:00:00");
+      else if (ev.datetime?.date && typeof ev.datetime.date === "string")
+        d = new Date(ev.datetime.date + "T00:00:00");
+      else if (ev.tsClient instanceof Timestamp)
+        d = ev.tsClient.toDate();
+      else if (ev.tsClient)
+        d = new Date(ev.tsClient);
+      else if (ev.timestamp instanceof Timestamp)
+        d = ev.timestamp.toDate();
+      else if (ev.timestamp)
+        d = new Date(ev.timestamp);
+      else if (ev.createdAt instanceof Timestamp)
+        d = ev.createdAt.toDate();
+      else if (ev.createdAt)
+        d = new Date(ev.createdAt);
+      return d && !isNaN(d.getTime()) ? d : null;
+    } catch { return null; }
+  }, []);
+
+  // Ambil timestamp aktual event (bukan hanya tanggal)
+  const getEventTime = useCallback((ev: any): Date | null => {
+    try {
+      let d: Date | null = null;
+      if (ev.tsClient instanceof Timestamp) d = ev.tsClient.toDate();
+      else if (ev.tsClient) d = new Date(ev.tsClient);
+      else if (ev.timestamp instanceof Timestamp) d = ev.timestamp.toDate();
+      else if (ev.timestamp) d = new Date(ev.timestamp);
+      else if (ev.datetime?.iso) d = new Date(ev.datetime.iso);
+      else if (ev.createdAt instanceof Timestamp) d = ev.createdAt.toDate();
+      else if (ev.createdAt) d = new Date(ev.createdAt);
+      return d && !isNaN(d.getTime()) ? d : null;
+    } catch { return null; }
+  }, []);
+
   const filteredEvents = useMemo(
     () =>
       sortedEvents.filter((ev: any) => {
-        let d: Date | null = null;
-        try {
-          d = ev.tsClient instanceof Timestamp
-            ? ev.tsClient.toDate()
-            : ev.tsClient ? new Date(ev.tsClient) : null;
-          if (d && isNaN(d.getTime())) d = null;
-        } catch {
-          d = null;
-        }
+        const d = getEventDate(ev);
         if (!d) return false;
-        return (
-          d >= filterStart &&
-          d <= filterEnd &&
-          (statusFilter === "all" || ev.status === statusFilter)
-        );
+        return d >= filterStart && d <= filterEnd;
+        // statusFilter diapply di filteredGroups, bukan di sini
       }),
-    [sortedEvents, filterStart, filterEnd, statusFilter],
+    [sortedEvents, filterStart, filterEnd, getEventDate],
   );
 
-  // Group history by date for the history tab
+  // Group history by date — statusFilter diapply setelah group
   const groupedHistory = useMemo(() => {
     const groups = new Map<string, any[]>();
     filteredEvents.forEach((ev: any) => {
-      let dt: Date | null = null;
-      try {
-        dt = ev.tsClient instanceof Timestamp
-          ? ev.tsClient.toDate()
-          : ev.tsClient ? new Date(ev.tsClient) : null;
-        if (dt && isNaN(dt.getTime())) dt = null;
-      } catch {
-        dt = null;
-      }
-      if (!dt) return;
-      const key = format(dt, "yyyy-MM-dd");
-      if (!groups.has(key)) groups.set(key, []);
-      groups.get(key)!.push({ ...ev, _date: dt });
+      const dateKey = ev.attendanceDate && typeof ev.attendanceDate === "string"
+        ? ev.attendanceDate
+        : ev.datetime?.date && typeof ev.datetime.date === "string"
+          ? ev.datetime.date
+          : (() => { const d = getEventDate(ev); return d ? format(d, "yyyy-MM-dd") : null; })();
+      if (!dateKey) return;
+      const dt = getEventTime(ev) ?? new Date(dateKey + "T00:00:00");
+      if (!groups.has(dateKey)) groups.set(dateKey, []);
+      groups.get(dateKey)!.push({ ...ev, _date: dt });
     });
+
     return Array.from(groups.entries())
       .sort(([a], [b]) => b.localeCompare(a))
-      .map(([date, events]) => ({
-        date,
-        dateLabel: format(new Date(date), "EEEE, dd MMMM yyyy", {
-          locale: localeId,
-        }),
-        checkIn: events.find((e: any) => e.type === "IN") ?? null,
-        checkOut: events.find((e: any) => e.type === "OUT") ?? null,
-        events,
-      }));
-  }, [filteredEvents]);
+      .map(([date, evts]) => {
+        const checkIn  = evts.find((e: any) => e.type === "IN")  ?? null;
+        const checkOut = evts.find((e: any) => e.type === "OUT") ?? null;
+
+        // Hitung durasi kerja
+        let durationMinutes: number | null = null;
+        if (checkIn && checkOut) {
+          const diff = checkOut._date.getTime() - checkIn._date.getTime();
+          if (diff > 0) durationMinutes = Math.floor(diff / 60000);
+        }
+
+        // Daily status
+        let dailyStatus: "COMPLETE" | "MISSING_OUT" | "MISSING_IN" | "ABSENT";
+        if (checkIn && checkOut) dailyStatus = "COMPLETE";
+        else if (checkIn && !checkOut) dailyStatus = "MISSING_OUT";
+        else if (!checkIn && checkOut) dailyStatus = "MISSING_IN";
+        else dailyStatus = "ABSENT";
+
+        return {
+          date,
+          dateLabel: format(new Date(date + "T00:00:00"), "EEEE, dd MMMM yyyy", { locale: localeId }),
+          checkIn,
+          checkOut,
+          durationMinutes,
+          dailyStatus,
+          events: evts,
+        };
+      });
+  }, [filteredEvents, getEventDate, getEventTime]);
+
+  // Apply statusFilter pada grouped history
+  const filteredGroups = useMemo(() => {
+    if (statusFilter === "all") return groupedHistory;
+    return groupedHistory.filter(({ checkIn, checkOut }) => {
+      switch (statusFilter) {
+        case "COMPLETE":     return !!(checkIn && checkOut);
+        case "LATE":         return checkIn?.status === "LATE";
+        case "EARLY_LEAVE":  return checkOut?.status === "EARLY_LEAVE";
+        case "MISSING_OUT":  return !!(checkIn && !checkOut);
+        case "MISSING_IN":   return !!(!checkIn && checkOut);
+        default:             return true;
+      }
+    });
+  }, [groupedHistory, statusFilter]);
+
+  // Ringkasan statistik periode filter
+  const historySummary = useMemo(() => {
+    let totalPresent = 0, totalLate = 0, totalEarlyLeave = 0,
+        totalMissingOut = 0, totalWorkMinutes = 0;
+    groupedHistory.forEach(({ checkIn, checkOut, durationMinutes }) => {
+      if (checkIn) totalPresent++;
+      if (checkIn?.status === "LATE") totalLate++;
+      if (checkOut?.status === "EARLY_LEAVE") totalEarlyLeave++;
+      if (checkIn && !checkOut) totalMissingOut++;
+      if (durationMinutes) totalWorkMinutes += durationMinutes;
+    });
+    return { totalPresent, totalLate, totalEarlyLeave, totalMissingOut, totalWorkMinutes };
+  }, [groupedHistory]);
 
   // ── Status calculator ──────────────────────────────────────────
   const calculateStatus = useCallback(
@@ -769,6 +852,12 @@ export default function AbsenPage() {
     setTapStep("selfie");
   }, []);
 
+  // OUT tidak butuh foto — langsung ke preview
+  const proceedToPreview = useCallback(() => {
+    setTapPhoto(null);
+    setTapStep("preview");
+  }, []);
+
   const handleSelfie = useCallback((base64: string) => {
     setTapPhoto(base64);
     setTapStep("preview");
@@ -784,7 +873,16 @@ export default function AbsenPage() {
 
   // ── Final submit ───────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
-    if (!tapPhoto || !user) return;
+    // IN wajib foto, OUT tidak perlu
+    if (tapType === 'IN' && !tapPhoto) {
+      toast({
+        variant: "destructive",
+        title: "Foto diperlukan",
+        description: "Foto wajah harus diambil untuk absen masuk.",
+      });
+      return;
+    }
+    if (!user) return;
     setTapStep("submitting");
     try {
       const now = tapTime;
@@ -793,45 +891,59 @@ export default function AbsenPage() {
       const flags = [...tapFlags];
       const { status, lateMinutes } = calculateStatus(tapType, now, activeSite);
 
-      const watermarked = await applyWatermark(
-        tapPhoto,
-        tapType,
-        gps ?? {
-          lat: 0,
-          lng: 0,
-          accuracyM: 0,
-          altitude: null,
-          heading: null,
-          speed: null,
-          distanceToSiteM: null,
-          insideRadius: false,
-          capturedAt: now,
-        },
-        addr,
-        now,
-      );
+      let driveFileId: string | null = null;
+      let driveViewUrl: string | null = null;
+      let driveDownload: string | null = null;
+      let driveFolderId: string | null = null;
+      let selfieUrl: string | null = null;
 
-      // Upload foto ke Google Drive via Apps Script (tidak pakai Firebase Storage)
-      const ts       = format(now, 'yyyyMMdd-HHmmss');
-      const action   = tapType === 'IN' ? 'masuk' : 'pulang';
-      const idStr    = user.employeeId || user.uid.slice(0, 8);
-      const fileName = `attendance-${idStr}-kehadiran_${action}-${ts}.jpg`;
+      // Upload foto HANYA untuk absen masuk (IN)
+      if (tapType === 'IN' && tapPhoto) {
+        const watermarked = await applyWatermark(
+          tapPhoto,
+          tapType,
+          gps ?? {
+            lat: 0,
+            lng: 0,
+            accuracyM: 0,
+            altitude: null,
+            heading: null,
+            speed: null,
+            distanceToSiteM: null,
+            insideRadius: false,
+            capturedAt: now,
+          },
+          addr,
+          now,
+        );
 
-      const uploadRes = await fetch('/api/upload-attendance-photo', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ fileName, mimeType: 'image/jpeg', base64: watermarked }),
-      });
-      const uploadData = await uploadRes.json().catch(() => null);
-      if (!uploadData?.success) {
-        throw new Error(uploadData?.error || 'Gagal mengunggah foto ke Google Drive. Coba lagi.');
+        const ts       = format(now, 'yyyyMMdd-HHmmss');
+        const idStr    = user.employeeId || user.uid.slice(0, 8);
+        const fileName = `attendance-${idStr}-kehadiran_masuk-${ts}.jpg`;
+
+        const uploadRes = await fetch('/api/upload-attendance-photo', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            fileName,
+            mimeType: 'image/jpeg',
+            base64: watermarked,
+            category: 'attendance',
+            ownerUid: user.uid,
+            uploadedBy: user.uid,
+          }),
+        });
+        const uploadData = await uploadRes.json().catch(() => null);
+        if (!uploadData?.success) {
+          throw new Error(uploadData?.error || 'Gagal mengunggah foto ke Google Drive. Coba lagi.');
+        }
+
+        driveFileId   = uploadData.fileId    || null;
+        driveViewUrl  = uploadData.viewUrl   || null;
+        driveDownload = uploadData.downloadUrl || null;
+        driveFolderId = uploadData.folderId  || null;
+        selfieUrl     = driveViewUrl || driveDownload || null;
       }
-
-      const driveFileId    = uploadData.fileId    || null;
-      const driveViewUrl   = uploadData.viewUrl   || null;
-      const driveDownload  = uploadData.downloadUrl || null;
-      const driveFolderId  = uploadData.folderId  || null;
-      const selfieUrl      = driveViewUrl || driveDownload || null;
 
       const datetime = {
         iso: now.toISOString(),
@@ -867,6 +979,9 @@ export default function AbsenPage() {
         employeeId: user.employeeId || null,
         attendanceMethod: "web_absen",
         type: tapType, // "IN" atau "OUT"
+        attendanceDate: format(now, "yyyy-MM-dd"),
+        attendanceMonth: format(now, "yyyy-MM"),
+        attendanceYear: now.getFullYear(),
         datetime,
         address: addr?.displayName || null,
         addressDetail: addr ? {
@@ -1064,16 +1179,13 @@ export default function AbsenPage() {
 
   // ─── Step: Verify Location ─────────────────────────────────────
   if (tapStep === "verifyLocation") {
-    const sa = tapAddress
-      ? shortAddr(tapAddress) || tapAddress.displayName
-      : null;
     const eventLabel =
       tapType === "IN" ? "Kehadiran Masuk" : "Kehadiran Pulang";
     return (
       <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto shadow-2xl border-x">
         {renderHeader(true)}
         <div className="flex-1 overflow-auto pb-6">
-          <StepPills current={0} />
+          <StepPills current={0} isOut={tapType === "OUT"} />
 
           <div className="p-4 space-y-4">
             {/* Event & Time */}
@@ -1148,12 +1260,21 @@ export default function AbsenPage() {
           </div>
 
           <div className="px-4 space-y-2">
-            <Button
-              onClick={proceedToSelfie}
-              className="w-full h-12 rounded-2xl font-bold gap-2"
-            >
-              <Camera className="w-4 h-4" /> Lanjut Ambil Foto
-            </Button>
+            {tapType === "IN" ? (
+              <Button
+                onClick={proceedToSelfie}
+                className="w-full h-12 rounded-2xl font-bold gap-2"
+              >
+                <Camera className="w-4 h-4" /> Lanjut Ambil Foto
+              </Button>
+            ) : (
+              <Button
+                onClick={proceedToPreview}
+                className="w-full h-12 rounded-2xl font-bold gap-2 bg-secondary hover:bg-secondary/90"
+              >
+                <CheckCircle2 className="w-4 h-4" /> Konfirmasi Pulang
+              </Button>
+            )}
             <Button
               variant="ghost"
               onClick={cancelTap}
@@ -1167,23 +1288,21 @@ export default function AbsenPage() {
     );
   }
 
-  // ─── Step: Selfie ──────────────────────────────────────────────
+  // ─── Step: Selfie (hanya untuk IN) ─────────────────────────────
   if (tapStep === "selfie") {
     return <CameraCapture onCapture={handleSelfie} onCancel={cancelTap} />;
   }
 
   // ─── Step: Preview ─────────────────────────────────────────────
   if (tapStep === "preview") {
-    const sa = tapAddress
-      ? shortAddr(tapAddress) || tapAddress.displayName
-      : null;
     return (
       <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto shadow-2xl border-x">
         {renderHeader(true)}
         <div className="flex-1 overflow-auto pb-6">
-          <StepPills current={2} />
+          <StepPills current={tapType === "OUT" ? 1 : 2} isOut={tapType === "OUT"} />
 
-          {tapPhoto && (
+          {/* Foto hanya ditampilkan untuk IN */}
+          {tapType === "IN" && tapPhoto && (
             <div className="px-4">
               <div className="w-full rounded-2xl border shadow-sm overflow-hidden bg-black">
                 <img
@@ -1279,17 +1398,20 @@ export default function AbsenPage() {
           <div className="px-4 space-y-2">
             <Button
               onClick={handleSubmit}
-              className="w-full h-12 rounded-2xl font-bold gap-2"
+              className={`w-full h-12 rounded-2xl font-bold gap-2 ${tapType === "OUT" ? "bg-secondary hover:bg-secondary/90" : ""}`}
             >
-              <CheckCircle2 className="w-4 h-4" /> Kirim Kehadiran
+              <CheckCircle2 className="w-4 h-4" />
+              {tapType === "IN" ? "Kirim Kehadiran Masuk" : "Kirim Kehadiran Pulang"}
             </Button>
-            <Button
-              variant="outline"
-              onClick={retakeSelfie}
-              className="w-full h-11 rounded-2xl gap-2"
-            >
-              <Camera className="w-4 h-4" /> Ulangi Selfie
-            </Button>
+            {tapType === "IN" && (
+              <Button
+                variant="outline"
+                onClick={retakeSelfie}
+                className="w-full h-11 rounded-2xl gap-2"
+              >
+                <Camera className="w-4 h-4" /> Ulangi Selfie
+              </Button>
+            )}
             <Button
               variant="ghost"
               onClick={cancelTap}
@@ -1315,7 +1437,7 @@ export default function AbsenPage() {
               Menyimpan Absensi
             </p>
             <p className="text-xs text-muted-foreground mt-1">
-              Mengunggah foto & menyimpan data...
+              {tapType === "IN" ? "Mengunggah foto & menyimpan data..." : "Menyimpan data kehadiran pulang..."}
             </p>
           </div>
         </div>
@@ -1818,139 +1940,208 @@ export default function AbsenPage() {
                     className="w-full text-[9px] h-7 px-2 rounded-lg border bg-white"
                   >
                     <option value="all">Semua Status</option>
-                    <option value="ON_TIME">Tepat Waktu</option>
+                    <option value="COMPLETE">Selesai (IN + OUT)</option>
                     <option value="LATE">Terlambat</option>
                     <option value="EARLY_LEAVE">Pulang Awal</option>
-                    <option value="NORMAL">Normal</option>
+                    <option value="MISSING_OUT">Lupa Absen Pulang</option>
+                    <option value="MISSING_IN">Lupa Absen Masuk</option>
                   </select>
                 </div>
 
                 {eventsLoading ? (
-                  <div className="flex justify-center py-8">
-                    <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                  <div className="space-y-3">
+                    {[1,2,3].map(i => (
+                      <div key={i} className="bg-white rounded-2xl border shadow-sm p-4 space-y-3 animate-pulse">
+                        <div className="h-3 bg-muted rounded w-2/3" />
+                        <div className="h-2 bg-muted rounded w-1/3" />
+                        <div className="h-2 bg-muted rounded w-1/2" />
+                      </div>
+                    ))}
                   </div>
                 ) : groupedHistory.length === 0 ? (
                   <div className="py-10 flex flex-col items-center gap-3 opacity-40">
                     <FileText className="w-8 h-8 text-muted-foreground" />
-                    <p className="text-xs italic text-muted-foreground">
+                    <p className="text-xs italic text-muted-foreground text-center">
                       Tidak ada riwayat pada periode ini.
                     </p>
                   </div>
                 ) : (
-                  <div className="space-y-3">
-                    {groupedHistory.map(
-                      ({ date, dateLabel, checkIn, checkOut }) => {
-                        const addr = checkIn?.addressDetail
-                          ? shortAddr(checkIn.addressDetail as AddressDetail) ||
-                            checkIn.address
-                          : checkIn?.address;
-                        const photo =
-                          checkIn?.evidence?.watermarkedSelfieUrl ||
-                          checkIn?.evidence?.selfieUrl ||
-                          checkIn?.photoUrl ||
-                          checkOut?.evidence?.watermarkedSelfieUrl ||
-                          checkOut?.evidence?.selfieUrl ||
-                          checkOut?.photoUrl ||
-                          null;
+                  <>
+                    {/* Ringkasan statistik periode */}
+                    {groupedHistory.length > 0 && (
+                      <div className="bg-white rounded-2xl border shadow-sm p-3">
+                        <p className="text-[8px] font-black text-muted-foreground uppercase mb-2">
+                          Ringkasan Periode
+                        </p>
+                        <div className="grid grid-cols-4 gap-1 text-center">
+                          <div>
+                            <p className="text-base font-black text-primary">{historySummary.totalPresent}</p>
+                            <p className="text-[8px] text-muted-foreground leading-tight">Hadir</p>
+                          </div>
+                          <div>
+                            <p className="text-base font-black text-red-500">{historySummary.totalLate}</p>
+                            <p className="text-[8px] text-muted-foreground leading-tight">Terlambat</p>
+                          </div>
+                          <div>
+                            <p className="text-base font-black text-orange-500">{historySummary.totalMissingOut}</p>
+                            <p className="text-[8px] text-muted-foreground leading-tight">Lupa Pulang</p>
+                          </div>
+                          <div>
+                            <p className="text-base font-black text-blue-500">
+                              {historySummary.totalWorkMinutes > 0
+                                ? `${Math.floor(historySummary.totalWorkMinutes / 60)}j`
+                                : "-"}
+                            </p>
+                            <p className="text-[8px] text-muted-foreground leading-tight">Total Jam</p>
+                          </div>
+                        </div>
+                      </div>
+                    )}
 
-                        return (
-                          <div
-                            key={date}
-                            className="bg-white rounded-2xl border shadow-sm overflow-hidden"
-                          >
-                            {/* Date header */}
-                            <div className="bg-muted/30 px-3 py-2 border-b">
-                              <p className="text-[9px] font-black uppercase text-muted-foreground">
-                                {dateLabel}
-                              </p>
-                            </div>
+                    {filteredGroups.length === 0 ? (
+                      <div className="py-8 flex flex-col items-center gap-3 opacity-40">
+                        <FileText className="w-7 h-7 text-muted-foreground" />
+                        <p className="text-xs italic text-muted-foreground text-center">
+                          Tidak ada riwayat dengan status ini pada periode yang dipilih.
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        {filteredGroups.map(({ date, dateLabel, checkIn, checkOut, durationMinutes, dailyStatus }) => {
+                          const addrIn = checkIn?.addressDetail
+                            ? shortAddr(checkIn.addressDetail as AddressDetail) || checkIn.address
+                            : checkIn?.address || null;
+                          const addrOut = checkOut?.addressDetail
+                            ? shortAddr(checkOut.addressDetail as AddressDetail) || checkOut.address
+                            : checkOut?.address || null;
+                          const photo = checkIn?.evidence?.watermarkedSelfieUrl
+                            || checkIn?.evidence?.driveViewUrl
+                            || checkIn?.evidence?.selfieUrl
+                            || checkIn?.photoUrl
+                            || null;
 
-                            <div className="p-3 space-y-2.5">
-                              {/* Kehadiran Masuk row */}
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                  <div className="w-7 h-7 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
-                                    <LogIn className="w-3.5 h-3.5 text-primary" />
-                                  </div>
-                                  <div>
-                                    <p className="text-[8px] font-bold text-muted-foreground uppercase">
-                                      Kehadiran Masuk
-                                    </p>
-                                    <p className="text-sm font-black tabular-nums">
-                                      {checkIn
-                                        ? format(checkIn._date, "HH:mm:ss")
-                                        : "--:--:--"}
-                                    </p>
-                                  </div>
-                                </div>
-                                {checkIn && (
-                                  <Badge
-                                    className={`text-[7px] border-none shrink-0 ${statusBadgeCls(checkIn.status)}`}
-                                  >
-                                    {statusLabel(checkIn)}
-                                  </Badge>
-                                )}
+                          const dailyBadge = (() => {
+                            switch (dailyStatus) {
+                              case "COMPLETE":    return { label: "Selesai",           cls: "bg-green-100 text-green-700" };
+                              case "MISSING_OUT": return { label: "Lupa Absen Pulang", cls: "bg-orange-100 text-orange-700" };
+                              case "MISSING_IN":  return { label: "Lupa Absen Masuk",  cls: "bg-red-100 text-red-700" };
+                              default:            return { label: "Tidak Lengkap",     cls: "bg-gray-100 text-gray-600" };
+                            }
+                          })();
+
+                          const durasiStr = durationMinutes != null
+                            ? (() => {
+                                const h = Math.floor(durationMinutes / 60);
+                                const m = durationMinutes % 60;
+                                return h > 0 ? `${h} jam ${m > 0 ? m + " menit" : ""}`.trim() : `${m} menit`;
+                              })()
+                            : null;
+
+                          return (
+                            <div key={date} className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+                              {/* Header tanggal + daily badge */}
+                              <div className="flex items-center justify-between px-3 py-2 bg-muted/20 border-b">
+                                <p className="text-[9px] font-black uppercase text-muted-foreground">{dateLabel}</p>
+                                <Badge className={`text-[7px] border-none shrink-0 ${dailyBadge.cls}`}>
+                                  {dailyBadge.label}
+                                </Badge>
                               </div>
 
-                              {/* Kehadiran Pulang row */}
-                              <div className="flex items-center justify-between">
-                                <div className="flex items-center gap-2">
-                                  <div className="w-7 h-7 rounded-xl bg-secondary/10 flex items-center justify-center shrink-0">
-                                    <LogOut className="w-3.5 h-3.5 text-secondary" />
+                              <div className="p-3 space-y-2">
+                                {/* Row masuk */}
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-7 h-7 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
+                                      <LogIn className="w-3.5 h-3.5 text-primary" />
+                                    </div>
+                                    <div>
+                                      <p className="text-[8px] font-bold text-muted-foreground uppercase">Masuk</p>
+                                      <p className="text-sm font-black tabular-nums">
+                                        {checkIn ? format(checkIn._date, "HH:mm") : "--:--"}
+                                        {checkIn && <span className="text-[8px] font-normal text-muted-foreground ml-1">WIB</span>}
+                                      </p>
+                                    </div>
                                   </div>
-                                  <div>
-                                    <p className="text-[8px] font-bold text-muted-foreground uppercase">
-                                      Kehadiran Pulang
-                                    </p>
-                                    <p className="text-sm font-black tabular-nums">
-                                      {checkOut
-                                        ? format(checkOut._date, "HH:mm:ss")
-                                        : "--:--:--"}
-                                    </p>
-                                  </div>
+                                  {checkIn ? (
+                                    <Badge className={`text-[7px] border-none shrink-0 ${statusBadgeCls(checkIn.status)}`}>
+                                      {statusLabel(checkIn)}
+                                    </Badge>
+                                  ) : (
+                                    <Badge className="text-[7px] border-none bg-gray-100 text-gray-500">Tidak ada</Badge>
+                                  )}
                                 </div>
-                                {checkOut && (
-                                  <Badge
-                                    className={`text-[7px] border-none shrink-0 ${statusBadgeCls(checkOut.status)}`}
-                                  >
-                                    {statusLabel(checkOut)}
-                                  </Badge>
+
+                                {/* Row pulang */}
+                                <div className="flex items-center justify-between">
+                                  <div className="flex items-center gap-2">
+                                    <div className="w-7 h-7 rounded-xl bg-secondary/10 flex items-center justify-center shrink-0">
+                                      <LogOut className="w-3.5 h-3.5 text-secondary" />
+                                    </div>
+                                    <div>
+                                      <p className="text-[8px] font-bold text-muted-foreground uppercase">Pulang</p>
+                                      <p className="text-sm font-black tabular-nums">
+                                        {checkOut ? format(checkOut._date, "HH:mm") : "--:--"}
+                                        {checkOut && <span className="text-[8px] font-normal text-muted-foreground ml-1">WIB</span>}
+                                      </p>
+                                    </div>
+                                  </div>
+                                  {checkOut ? (
+                                    <Badge className={`text-[7px] border-none shrink-0 ${statusBadgeCls(checkOut.status)}`}>
+                                      {statusLabel(checkOut)}
+                                    </Badge>
+                                  ) : (
+                                    <Badge className="text-[7px] border-none bg-gray-100 text-gray-500">Tidak ada</Badge>
+                                  )}
+                                </div>
+
+                                {/* Durasi kerja */}
+                                {durasiStr && (
+                                  <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground border-t pt-2">
+                                    <Clock className="w-3 h-3 shrink-0" />
+                                    <span>Durasi kerja: <span className="font-black text-foreground">{durasiStr}</span></span>
+                                  </div>
                                 )}
-                              </div>
 
-                              {/* Address */}
-                              {addr && (
-                                <div className="flex items-start gap-1.5 text-[8px] text-muted-foreground bg-muted/20 rounded-lg px-2.5 py-1.5">
-                                  <MapPin className="w-3 h-3 mt-0.5 shrink-0" />
-                                  <span className="leading-tight line-clamp-2">
-                                    {addr}
-                                  </span>
-                                </div>
-                              )}
+                                {/* Lokasi masuk */}
+                                {addrIn && (
+                                  <div className="flex items-start gap-1.5 text-[8px] text-muted-foreground bg-muted/20 rounded-lg px-2 py-1.5">
+                                    <MapPin className="w-3 h-3 mt-0.5 shrink-0 text-primary/60" />
+                                    <div className="min-w-0">
+                                      <span className="font-bold text-[7px] uppercase text-primary/60">Masuk: </span>
+                                      <span className="line-clamp-1">{addrIn}</span>
+                                    </div>
+                                  </div>
+                                )}
 
-                              {/* Photo */}
-                              {photo ? (
-                                <div className="flex">
+                                {/* Lokasi pulang (jika beda dengan masuk) */}
+                                {addrOut && addrOut !== addrIn && (
+                                  <div className="flex items-start gap-1.5 text-[8px] text-muted-foreground bg-muted/20 rounded-lg px-2 py-1.5">
+                                    <MapPin className="w-3 h-3 mt-0.5 shrink-0 text-secondary/60" />
+                                    <div className="min-w-0">
+                                      <span className="font-bold text-[7px] uppercase text-secondary/60">Pulang: </span>
+                                      <span className="line-clamp-1">{addrOut}</span>
+                                    </div>
+                                  </div>
+                                )}
+
+                                {/* Foto bukti masuk */}
+                                {photo && (
                                   <a
                                     href={photo}
                                     target="_blank"
                                     rel="noreferrer"
-                                    className="w-full inline-block text-center py-2 px-3 bg-primary/10 text-primary rounded-xl font-bold"
+                                    className="flex items-center justify-center gap-1.5 py-2 px-3 bg-primary/10 text-primary rounded-xl text-[9px] font-bold border border-primary/20 hover:bg-primary/20 transition-colors"
                                   >
-                                    Lihat Foto
+                                    <Camera className="w-3 h-3" /> Lihat Bukti Foto Masuk
                                   </a>
-                                </div>
-                              ) : (
-                                <p className="text-[11px] text-muted-foreground">
-                                  Foto belum tersedia.
-                                </p>
-                              )}
+                                )}
+                              </div>
                             </div>
-                          </div>
-                        );
-                      },
+                          );
+                        })}
+                      </div>
                     )}
-                  </div>
+                  </>
                 )}
               </>
             )}

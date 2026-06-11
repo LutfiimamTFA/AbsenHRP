@@ -17,7 +17,7 @@ async function postToAppsScript(url: string, payload: object): Promise<Response>
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json().catch(() => null);
-    const { fileName, mimeType, base64 } = body || {};
+    const { fileName, mimeType, base64, category, ownerUid, uploadedBy } = body || {};
 
     if (!fileName || !base64) {
       return NextResponse.json(
@@ -55,6 +55,9 @@ export async function POST(request: NextRequest) {
       fileName,
       mimeType: mimeType || 'image/jpeg',
       base64,
+      category: category || 'attendance',
+      ownerUid: ownerUid || null,
+      uploadedBy: uploadedBy || null,
     };
 
     console.log('[upload-attendance] POST to Apps Script:', {

@@ -17,37 +17,31 @@ export function CameraCapture({ onCapture, onCancel }: CameraCaptureProps) {
   const [ready, setReady] = useState(false);
 
   const startCamera = useCallback(async () => {
-    // stop any existing stream first
     streamRef.current?.getTracks().forEach((t) => t.stop());
     streamRef.current = null;
     setError(null);
     setReady(false);
     try {
+      // Tidak paksa aspect ratio portrait ekstrem — biarkan kamera pilih resolusi natural
       const s = await navigator.mediaDevices.getUserMedia({
         video: {
           facingMode: { ideal: "user" },
-          width: { ideal: 720 },
-          height: { ideal: 1280 },
-          aspectRatio: { ideal: 0.5625 },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
         },
         audio: false,
       });
       streamRef.current = s;
       if (videoRef.current) {
         videoRef.current.srcObject = s;
-        // try to play and mark ready when metadata loaded
         videoRef.current.onloadedmetadata = () => {
-          try {
-            videoRef.current?.play();
-          } catch {}
+          try { videoRef.current?.play(); } catch {}
           setReady(true);
         };
       }
     } catch (err) {
       console.error("startCamera error", err);
-      setError(
-        "Kamera tidak dapat dibuka. Izinkan akses kamera lalu coba lagi.",
-      );
+      setError("Kamera tidak dapat dibuka. Izinkan akses kamera lalu coba lagi.");
     }
   }, []);
 
@@ -56,9 +50,7 @@ export function CameraCapture({ onCapture, onCancel }: CameraCaptureProps) {
     return () => {
       streamRef.current?.getTracks().forEach((t) => t.stop());
       if (videoRef.current) {
-        try {
-          videoRef.current.srcObject = null;
-        } catch {}
+        try { videoRef.current.srcObject = null; } catch {}
       }
       streamRef.current = null;
       setReady(false);
@@ -69,55 +61,36 @@ export function CameraCapture({ onCapture, onCancel }: CameraCaptureProps) {
   const capture = () => {
     const video = videoRef.current;
     if (!video || !ready) return;
-    const vw = video.videoWidth || 720;
-    const vh = video.videoHeight || 1280;
-    // target portrait ratio 9:16
-    const targetRatio = 9 / 16;
+    const vw = video.videoWidth || 1280;
+    const vh = video.videoHeight || 720;
 
-    // create target canvas (portrait)
     const canvas = document.createElement("canvas");
-    canvas.width = 720;
-    canvas.height = 1280;
+    canvas.width = vw;
+    canvas.height = vh;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
-
-    // fill background neutral
-    ctx.fillStyle = "#000";
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
 
     // Mirror horizontally for selfie orientation
     ctx.translate(canvas.width, 0);
     ctx.scale(-1, 1);
+    ctx.drawImage(video, 0, 0, vw, vh);
 
-    // compute scale to fit entire video into portrait canvas without cropping
-    const scale = Math.min(canvas.width / vw, canvas.height / vh);
-    const dw = Math.round(vw * scale);
-    const dh = Math.round(vh * scale);
-    const dx = Math.round((canvas.width - dw) / 2);
-    const dy = Math.round((canvas.height - dh) / 2);
-
-    ctx.drawImage(video, 0, 0, vw, vh, dx, dy, dw, dh);
     const data = canvas.toDataURL("image/jpeg", 0.92);
     setPreview(data);
   };
 
   const retake = () => {
-    // Reset preview and reinitialize camera stream
     setPreview(null);
     setError(null);
     setReady(false);
-    // Restart camera to ensure fresh stream
     startCamera();
   };
 
   const usePhoto = () => {
     if (!preview) return;
-    // stop camera and cleanup
     streamRef.current?.getTracks().forEach((t) => t.stop());
     if (videoRef.current) {
-      try {
-        videoRef.current.srcObject = null;
-      } catch {}
+      try { videoRef.current.srcObject = null; } catch {}
     }
     streamRef.current = null;
     setReady(false);
@@ -125,12 +98,9 @@ export function CameraCapture({ onCapture, onCancel }: CameraCaptureProps) {
   };
 
   const handleCancel = () => {
-    // stop and cleanup
     streamRef.current?.getTracks().forEach((t) => t.stop());
     if (videoRef.current) {
-      try {
-        videoRef.current.srcObject = null;
-      } catch {}
+      try { videoRef.current.srcObject = null; } catch {}
     }
     streamRef.current = null;
     setPreview(null);
@@ -190,17 +160,15 @@ export function CameraCapture({ onCapture, onCancel }: CameraCaptureProps) {
           >
             <X className="w-5 h-5 text-white" />
           </button>
-          <span className="text-white text-sm font-bold">Selfie</span>
+          <span className="text-white text-sm font-bold">Selfie Kehadiran</span>
           <div className="w-9" />
         </div>
 
-        {/* Camera area */}
-        <div className="flex-1 relative overflow-hidden">
+        {/* Camera area — object-contain agar wajah tidak terpotong */}
+        <div className="flex-1 relative overflow-hidden bg-black">
           {error ? (
             <div className="flex flex-col items-center justify-center h-full gap-5 p-6">
-              <p className="text-white text-sm text-center leading-relaxed">
-                {error}
-              </p>
+              <p className="text-white text-sm text-center leading-relaxed">{error}</p>
               <Button
                 onClick={startCamera}
                 variant="outline"
@@ -216,24 +184,23 @@ export function CameraCapture({ onCapture, onCancel }: CameraCaptureProps) {
                 autoPlay
                 playsInline
                 muted
-                className="w-full h-full object-cover scale-x-[-1]"
+                className="w-full h-full object-contain scale-x-[-1]"
               />
               {/* Face guide oval */}
               <div
                 className="absolute inset-0 flex items-center justify-center pointer-events-none"
-                style={{ paddingBottom: "10%" }}
               >
                 <div
                   style={{
-                    width: "62%",
-                    aspectRatio: "9 / 16",
+                    width: "55%",
+                    aspectRatio: "3 / 4",
                     borderRadius: "50%",
                     border: "2.5px solid rgba(255,255,255,0.85)",
-                    boxShadow: "0 0 0 9999px rgba(0,0,0,0.30)",
+                    boxShadow: "0 0 0 9999px rgba(0,0,0,0.28)",
                   }}
                 />
               </div>
-              <div className="absolute bottom-6 inset-x-0 flex justify-center pointer-events-none">
+              <div className="absolute bottom-4 inset-x-0 flex justify-center pointer-events-none">
                 <span className="bg-black/50 text-white text-xs px-3 py-1.5 rounded-full">
                   Posisikan wajah di dalam lingkaran
                 </span>
