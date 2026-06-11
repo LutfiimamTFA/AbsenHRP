@@ -100,8 +100,14 @@ function shortAddr(a: AddressDetail): string {
     .join(", ");
 }
 
-// Firestore tidak boleh simpan undefined — convert ke null atau hapus
+// Firestore tidak boleh simpan undefined — convert ke null atau hapus.
+// Jangan process Timestamp, Date, atau FieldValue (Firestore special types).
 function cleanUndefined(value: any): any {
+  // Jangan process Timestamp, Date, FieldValue (Firestore special types)
+  if (value instanceof Timestamp || value instanceof Date || value?.constructor?.name === 'FieldValue') {
+    return value;
+  }
+
   if (Array.isArray(value)) {
     return value.map(cleanUndefined);
   }
@@ -367,12 +373,12 @@ export default function AbsenPage() {
   const todayStatus = useMemo(() => {
     const todayStr = format(new Date(), "yyyy-MM-dd");
     const events = sortedEvents.filter((ev: any) => {
-      let d: Date | null = null;
+      let d: Date;
       try {
         d = ev.tsClient instanceof Timestamp
           ? ev.tsClient.toDate()
           : ev.tsClient ? new Date(ev.tsClient) : new Date();
-        if (d && isNaN(d.getTime())) d = new Date();
+        if (isNaN(d.getTime())) d = new Date();
       } catch {
         d = new Date();
       }
@@ -827,7 +833,6 @@ export default function AbsenPage() {
       const driveFolderId  = uploadData.folderId  || null;
       const selfieUrl      = driveViewUrl || driveDownload || null;
 
-      const submittedAt = new Date();
       const datetime = {
         iso: now.toISOString(),
         date: format(now, "yyyy-MM-dd"),
@@ -852,80 +857,73 @@ export default function AbsenPage() {
           }
         : null;
 
-      // Explicit map addressDetail untuk menghindari undefined
-      const addressDetailSafe = addr ? {
-        road: addr.road || null,
-        neighbourhood: addr.neighbourhood || null,
-        suburb: addr.suburb || null,
-        village: addr.village || null,
-        kelurahan: addr.kelurahan || null,
-        district: addr.district || null,
-        kecamatan: addr.kecamatan || null,
-        city: addr.city || null,
-        kota: addr.kota || null,
-        kabupatenKota: addr.kabupatenKota || null,
-        county: addr.county || null,
-        regency: addr.regency || null,
-        state: addr.state || null,
-        province: addr.province || null,
-        postcode: addr.postcode || null,
-        country: addr.country || null,
-        displayName: addr.displayName || null,
-      } : null;
-
-      // Payload dengan semua field yang aman (tidak undefined)
-      const payload = cleanUndefined({
+      // Base payload (tanpa Timestamp, akan di-clean)
+      const basePayload = {
         uid: user.uid,
-        userName: user.displayName,
-        brandId: user.brandId || null,
+        employeeUid: user.uid,
+        userName: user.displayName || null,
         brandName: user.brandName || null,
-        employeeId: user.employeeId || null,
         divisionName: user.division || null,
+        employeeId: user.employeeId || null,
         attendanceMethod: "web_absen",
-        type: tapType,
-        mode: gps?.insideRadius ? "normal" : "offsite",
+        type: tapType, // "IN" atau "OUT"
         datetime,
-        tsClient: Timestamp.fromDate(now),
-        tsServer: serverTimestamp(),
-        geo: gps
-          ? {
-              lat: gps.lat,
-              lng: gps.lng,
-              accuracyM: gps.accuracyM,
-              altitude: gps.altitude ?? null,
-              heading: gps.heading ?? null,
-              speed: gps.speed ?? null,
-              distanceToSiteM: gps.distanceToSiteM ?? null,
-              insideRadius: gps.insideRadius,
-            }
-          : null,
         address: addr?.displayName || null,
-        addressDetail: addressDetailSafe,
+        addressDetail: addr ? {
+          displayName: addr.displayName || null,
+          road: addr.road || null,
+          neighbourhood: addr.neighbourhood || null,
+          village: addr.village || null,
+          kelurahan: addr.kelurahan || null,
+          district: addr.district || null,
+          kecamatan: addr.kecamatan || null,
+          city: addr.city || null,
+          regency: addr.regency || null,
+          kabupatenKota: addr.kabupatenKota || null,
+          province: addr.province || null,
+          postcode: addr.postcode || null,
+          country: addr.country || null,
+        } : null,
+        geo: gps ? {
+          lat: gps.lat ?? null,
+          lng: gps.lng ?? null,
+          accuracyM: gps.accuracyM ?? null,
+          distanceToSiteM: gps.distanceToSiteM ?? null,
+          insideRadius: gps.insideRadius ?? false,
+        } : null,
+        status,
+        lateMinutes: lateMinutes ?? 0,
+        flags: flags || [],
         siteId: activeSite?.id || "OFFSITE",
         siteName: activeSite?.name || "Luar Kantor",
         siteSnapshot,
-        status,
-        lateMinutes,
-        flags,
         photoUrl: selfieUrl,
         evidence: {
-          selfieUrl,
-          watermarkedSelfieUrl: driveViewUrl,
-          driveFileId:   driveFileId,
-          driveFolderId: driveFolderId,
-          driveViewUrl:  driveViewUrl,
-          driveDownloadUrl: driveDownload,
-          storageProvider: 'google_drive_apps_script',
+          selfieUrl: driveViewUrl || null,
+          watermarkedSelfieUrl: driveViewUrl || null,
+          driveFileId: driveFileId || null,
+          driveFolderId: driveFolderId || null,
+          driveViewUrl: driveViewUrl || null,
+          driveDownloadUrl: driveDownload || null,
+          storageProvider: "google_drive_apps_script",
           watermarked: true,
-          source: 'web_absen_hrp',
+          source: "web_absen_hrp",
           userAgent: navigator.userAgent,
           platform: navigator.platform,
-          deviceType: /Mobi|Android/i.test(navigator.userAgent) ? 'mobile' : 'desktop',
-          locationCapturedAt: gps ? Timestamp.fromDate(gps.capturedAt) : null,
-          photoCapturedAt: Timestamp.fromDate(submittedAt),
-          submittedAt: Timestamp.fromDate(submittedAt),
         },
-      });
+      };
+
+      // Clean undefined dari basePayload
+      const cleanedPayload = cleanUndefined(basePayload);
+
+      // Tambah Timestamp fields setelah clean
+      const payload = {
+        ...cleanedPayload,
+        tsClient: Timestamp.fromDate(now),
+        tsServer: serverTimestamp(),
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      };
 
       await addDoc(collection(db, "attendance_events"), payload);
       setTapStep("success");
