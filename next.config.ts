@@ -1,7 +1,17 @@
 import type {NextConfig} from 'next';
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // Jangan bundle packages ini — biarkan Node.js load natively agar ESM/CJS interop benar.
+  // Tanpa ini, webpack gagal bundle firebase-admin (yang pakai jwks-rsa → require(jose) → ESM error).
+  serverExternalPackages: [
+    'firebase-admin',
+    'firebase-admin/app',
+    'firebase-admin/auth',
+    'firebase-admin/firestore',
+    '@simplewebauthn/server',
+    'jwks-rsa',
+    'jose',
+  ],
   typescript: {
     ignoreBuildErrors: true,
   },

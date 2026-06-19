@@ -1,18 +1,17 @@
 // Firebase Admin SDK — server-side only (API routes).
-// Requires FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY di .env.local
+// Requires FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, FIREBASE_PRIVATE_KEY di .env / Vercel env vars.
 // Private key: Firebase Console → Project Settings → Service Accounts → Generate new private key
 
-import type { App } from 'firebase-admin/app';
+import { initializeApp, getApps, cert, type App } from 'firebase-admin/app';
+import { getFirestore, type Firestore } from 'firebase-admin/firestore';
+import { getAuth, type Auth } from 'firebase-admin/auth';
 
 let adminApp: App | undefined;
 
 function getAdminApp(): App {
   if (adminApp) return adminApp;
 
-  // Lazy require to avoid loading firebase-admin in client bundles
-  const { initializeApp, getApps, cert } = require('firebase-admin/app');
-
-  const existing = (getApps() as App[])[0];
+  const existing = getApps()[0];
   if (existing) {
     adminApp = existing;
     return adminApp;
@@ -25,28 +24,25 @@ function getAdminApp(): App {
 
   if (!projectId || !clientEmail || !privateKey) {
     throw new Error(
-      '[Firebase Admin] Variabel FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, dan FIREBASE_PRIVATE_KEY wajib diisi di .env.local'
+      '[Firebase Admin] FIREBASE_PROJECT_ID, FIREBASE_CLIENT_EMAIL, dan FIREBASE_PRIVATE_KEY wajib diisi di env vars'
     );
   }
   if (privateKey.includes('ISI_PRIVATE_KEY')) {
     throw new Error(
       '[Firebase Admin] FIREBASE_PRIVATE_KEY masih placeholder. ' +
       'Download service account JSON dari Firebase Console → Project Settings → Service Accounts → ' +
-      'Generate new private key, lalu salin nilai "private_key" ke .env.local.'
+      'Generate new private key, lalu salin nilai "private_key" ke Vercel Environment Variables.'
     );
   }
 
-  const app: App = initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
-  adminApp = app;
-  return app;
+  adminApp = initializeApp({ credential: cert({ projectId, clientEmail, privateKey }) });
+  return adminApp;
 }
 
-export function getAdminFirestore() {
-  const { getFirestore } = require('firebase-admin/firestore');
-  return getFirestore(getAdminApp()) as import('firebase-admin/firestore').Firestore;
+export function getAdminFirestore(): Firestore {
+  return getFirestore(getAdminApp());
 }
 
-export function getAdminAuth() {
-  const { getAuth } = require('firebase-admin/auth');
-  return getAuth(getAdminApp()) as import('firebase-admin/auth').Auth;
+export function getAdminAuth(): Auth {
+  return getAuth(getAdminApp());
 }

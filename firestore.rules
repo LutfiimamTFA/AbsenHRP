@@ -85,11 +85,16 @@ service cloud.firestore {
 
     // ── passkeys/{credentialId} ───────────────────────────────────────────────
     // Collection untuk Login Cepat (Passkey/WebAuthn).
-    // Menulis hanya via API routes server-side (Firebase Admin SDK).
-    // Karyawan hanya bisa baca passkey milik sendiri (field uid).
+    // Tulis hanya via Firebase Admin SDK (API route server-side) → admin bypass rules.
+    // Client hanya perlu READ untuk menampilkan status "sudah aktif / belum".
     match /passkeys/{credentialId} {
-      allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
-      // Tulis dilarang dari client — hanya lewat Firebase Admin via API route
+      // get (baca 1 dokumen): pastikan field uid cocok
+      allow get: if isSignedIn() && resource.data.uid == request.auth.uid;
+      // list (query): izinkan jika user query passkey-nya sendiri
+      // Client wajib kirim where('uid', '==', auth.uid) agar setiap dokumen hasil query
+      // memenuhi resource.data.uid == request.auth.uid
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      // Tulis dari client dilarang — hanya lewat Admin SDK
       allow write: if false;
     }
 

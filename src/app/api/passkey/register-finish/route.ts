@@ -1,37 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { verifyRegistrationResponse } from '@simplewebauthn/server';
+import { Timestamp } from 'firebase-admin/firestore';
 import { getAdminAuth, getAdminFirestore } from '@/lib/firebase-admin';
 
 export const runtime = 'nodejs';
 
-function getRpConfig(origin: string) {
+function getRpConfig(req: NextRequest) {
+  const origin = req.headers.get('origin') ?? req.nextUrl.origin;
   try {
-    const url = new URL(origin);
-    return { rpID: url.hostname, origin };
+    return { rpID: new URL(origin).hostname, origin };
   } catch {
-    return { rpID: 'localhost', origin };
+    return { rpID: 'localhost', origin: 'http://localhost:9002' };
   }
 }
 
 export async function POST(req: NextRequest) {
   try {
-    const { idToken, challengeId, response, deviceName } = await req.json();
+    const body = await req.json().catch(() => ({}));
+    const { idToken, challengeId, response, deviceName } = body;
+
     if (!idToken || !challengeId || !response) {
-      return NextResponse.json({ error: 'idToken, challengeId, dan response diperlukan' }, { status: 400 });
+      return NextResponse.json(
+        { error: 'idToken, challengeId, dan response diperlukan' },
+        { status: 400 }
+      );
     }
 
+    // Verifikasi Firebase ID token
     const adminAuth = getAdminAuth();
     const decoded   = await adminAuth.verifyIdToken(idToken);
     const uid       = decoded.uid;
 
-    const origin = req.headers.get('origin') || 'http://localhost:9002';
-    const { rpID } = getRpConfig(origin);
+    const { rpID, origin } = getRpConfig(req);
+    console.log('[passkey/register-finish] uid=', uid, 'rpID=', rpID);
 
     const db = getAdminFirestore();
-    const { Timestamp } = require('firebase-admin/firestore');
 
     // Ambil dan validasi challenge
-    const challengeRef = db.collection('passkey_challenges').doc(challengeId);
+    const challengeRef  = db.collection('passkey_challenges').doc(challengeId);
     const challengeSnap = await challengeRef.get();
     if (!challengeSnap.exists) {
       return NextResponse.json({ error: 'Challenge tidak valid atau sudah kedaluwarsa.' }, { status: 400 });
@@ -49,8 +55,8 @@ export async function POST(req: NextRequest) {
     const { verified, registrationInfo } = await verifyRegistrationResponse({
       response,
       expectedChallenge: challengeData.challenge,
-      expectedOrigin: origin,
-      expectedRPID: rpID,
+      expectedOrigin:    origin,
+      expectedRPID:      rpID,
       requireUserVerification: false,
     });
 
@@ -59,31 +65,38 @@ export async function POST(req: NextRequest) {
     }
 
     const { credential } = registrationInfo;
-    const credentialId  = Buffer.from(credential.id).toString('base64url');
-    const publicKey     = Buffer.from(credential.publicKey).toString('base64url');
-    const counter       = credential.counter;
-    const transports    = (response.response?.transports as string[] | undefined) ?? [];
+    const credentialId   = Buffer.from(credential.id).toString('base64url');
+    const publicKey      = Buffer.from(credential.publicKey).toString('base64url');
+    const transports     = (response.response?.transports as string[] | undefined) ?? [];
 
-    // Simpan passkey di Firestore
+    // Simpan passkey di Firestore (via Admin SDK — bypass security rules)
     await db.collection('passkeys').doc(credentialId).set({
       credentialId,
       publicKey,
-      counter,
+      counter:    credential.counter,
       transports,
       uid,
-      deviceName: deviceName || 'Perangkat',
-      userAgent: req.headers.get('user-agent') || '',
-      isActive: true,
-      createdAt: Timestamp.now(),
+      deviceName: deviceName || req.headers.get('user-agent')?.match(/\(([^)]+)\)/)?.[1] || 'Perangkat',
+      userAgent:  req.headers.get('user-agent') ?? '',
+      isActive:   true,
+      createdAt:  Timestamp.now(),
       lastUsedAt: Timestamp.now(),
     });
 
     // Hapus challenge setelah dipakai
     await challengeRef.delete();
 
+    console.log('[passkey/register-finish] Passkey disimpan credentialId=', credentialId);
     return NextResponse.json({ success: true, credentialId });
   } catch (err: any) {
-    console.error('[passkey/register-finish]', err.message);
-    return NextResponse.json({ error: err.message || 'Error tidak diketahui' }, { status: 500 });
+    console.error('[PASSKEY REGISTER FINISH ERROR]', err?.message ?? err);
+    return NextResponse.json(
+      {
+        success: false,
+        message: 'Gagal menyelesaikan registrasi Login Cepat.',
+        error:   err instanceof Error ? err.message : String(err),
+      },
+      { status: 500 }
+    );
   }
 }
