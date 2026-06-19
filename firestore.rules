@@ -1,61 +1,128 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Fungsi pembantu umum
+
+    // ── Fungsi pembantu ──────────────────────────────────────────────────────
+
     function isSignedIn() {
       return request.auth != null;
     }
-    
-    function isStaff() {
-      return isSignedIn() && 
-        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
-        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role in ['hrd', 'manager', 'superadmin', 'super-admin'];
+
+    function isPrivileged() {
+      // HRD / Manager / SuperAdmin — baca dari users/{uid}.role
+      // Cek exists() lebih dulu agar tidak error jika dokumen belum ada
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+           in ['hrd', 'manager', 'superadmin', 'super-admin'];
     }
 
-    // Koleksi Profil User
+    // Cek apakah request membuat dokumen yang mengandung uid milik sendiri
+    // Mendukung berbagai nama field ownership
+    function isOwnCreate() {
+      return isSignedIn() && (
+        request.resource.data.get('uid',        null) == request.auth.uid ||
+        request.resource.data.get('userId',     null) == request.auth.uid ||
+        request.resource.data.get('employeeUid',null) == request.auth.uid
+      );
+    }
+
+    // Cek apakah dokumen yang sudah ada milik user sendiri
+    function isOwnDoc() {
+      return isSignedIn() && (
+        resource.data.get('uid',        null) == request.auth.uid ||
+        resource.data.get('userId',     null) == request.auth.uid ||
+        resource.data.get('employeeUid',null) == request.auth.uid
+      );
+    }
+
+
+    // ── users/{uid} ──────────────────────────────────────────────────────────
     match /users/{uid} {
+      // User baca/tulis dokumen sendiri
       allow read, write: if isSignedIn() && request.auth.uid == uid;
+      // Siapapun yang login boleh GET dokumen user lain
+      // (dibutuhkan isPrivileged() untuk membaca role orang lain)
       allow get: if isSignedIn();
     }
-    
-    // Koleksi Lokasi Kantor (Site A/B)
-    match /attendance_sites/{siteId} {
-      // Izinkan baca (get & list) untuk semua user agar site resolver jalan
-      allow read: if isSignedIn();
-    }
-    
-    // Koleksi Event Absensi
-    match /attendance_events/{eventId} {
-      // User hanya bisa membuat data milik sendiri
-      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
-      
-      // Izinkan baca jika pemilik data ATAU jika user adalah staf/admin
-      // Gunakan get, list agar query 'where uid == auth.uid' berhasil
-      allow get, list: if isSignedIn() && (resource.data.uid == request.auth.uid || isStaff());
-    }
 
-    // Koleksi profil karyawan dari HRP utama (berisi attendanceMethod, dll.)
+
+    // ── employee_profiles/{uid} ───────────────────────────────────────────────
     match /employee_profiles/{uid} {
+      // Karyawan bisa baca profil sendiri
       allow read: if isSignedIn() && request.auth.uid == uid;
-      allow read, write: if isStaff();
+      // HRD/Admin bisa baca+tulis semua profil
+      allow read, write: if isPrivileged();
     }
 
-    // Koleksi Penunjang Site Resolver & HRP
+
+    // ── attendance_sites ─────────────────────────────────────────────────────
+    match /attendance_sites/{siteId} {
+      // Semua user yang login boleh baca lokasi kantor (diperlukan validasi jarak)
+      allow read: if isSignedIn();
+      // Hanya HRD/Admin yang boleh tulis
+      allow write: if isPrivileged();
+    }
+
+
+    // ── attendance_events ─────────────────────────────────────────────────────
+    match /attendance_events/{eventId} {
+      // Buat record absen: harus milik sendiri (uid / userId / employeeUid)
+      allow create: if isOwnCreate();
+
+      // Baca dokumen tunggal: milik sendiri atau HRD/Admin
+      allow get: if isSignedIn() && (isOwnDoc() || isPrivileged());
+
+      // List/query: karyawan hanya boleh query with where("uid","==",auth.uid)
+      // Rules Firestore akan verifikasi tiap dokumen → isOwnDoc() menjamin
+      // query tidak bocor ke data orang lain
+      allow list: if isSignedIn() && (isOwnDoc() || isPrivileged());
+
+      // Hanya HRD/Admin yang boleh update/delete
+      allow update, delete: if isPrivileged();
+    }
+
+
+    // ── passkeys/{credentialId} ───────────────────────────────────────────────
+    // Collection untuk Login Cepat (Passkey/WebAuthn).
+    // Menulis hanya via API routes server-side (Firebase Admin SDK).
+    // Karyawan hanya bisa baca passkey milik sendiri (field uid).
+    match /passkeys/{credentialId} {
+      allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
+      // Tulis dilarang dari client — hanya lewat Firebase Admin via API route
+      allow write: if false;
+    }
+
+
+    // ── passkey_challenges/{id} ───────────────────────────────────────────────
+    // Challenge sementara WebAuthn — hanya diakses oleh API routes (Admin SDK).
+    match /passkey_challenges/{id} {
+      allow read, write: if false;
+    }
+
+
+    // ── Koleksi pendukung HRP ─────────────────────────────────────────────────
     match /profiles/{uid} {
       allow read: if isSignedIn();
     }
-    
+
     match /brands/{brandId} {
       allow read: if isSignedIn();
     }
-    
+
+    match /companies/{companyId} {
+      allow read: if isSignedIn();
+    }
+
     match /work_locations/{locId} {
       allow read: if isSignedIn();
     }
 
-    // Fallback global untuk akses admin/staf ke seluruh database
+
+    // ── Fallback: HRD/Admin baca semua ───────────────────────────────────────
+    // Hanya berlaku untuk path yang belum punya rule spesifik di atas
     match /{path=**} {
-      allow read: if isStaff();
+      allow read: if isPrivileged();
     }
   }
 }

@@ -43,6 +43,8 @@ import {
   ShieldAlert,
   X,
   CalendarDays,
+  Fingerprint,
+  ShieldCheck,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -268,6 +270,13 @@ export default function AbsenPage() {
   );
   const [statusFilter, setStatusFilter] = useState("all");
 
+  // Passkey / Login Cepat state
+  const [passkeys, setPasskeys]                     = useState<any[]>([]);
+  const [passkeyLoading, setPasskeyLoading]         = useState(false);
+  const [showPasskeyManage, setShowPasskeyManage]   = useState(false);
+  const [passkeySupported, setPasskeySupported]         = useState<boolean | null>(null); // null = belum dicek
+  const [passkeyCardDismissed, setPasskeyCardDismissed] = useState(false); // session-only
+
   // Photo modal state
   const [photoModal, setPhotoModal] = useState<{
     fileId: string;
@@ -298,6 +307,90 @@ export default function AbsenPage() {
     else if (user.role === "kandidat") router.push("/unauthorized");
   }, [user, userLoading, router]);
 
+  // ── Cek dukungan WebAuthn ─────────────────────────────────────
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const supported = !!window.PublicKeyCredential && !!window.isSecureContext;
+    console.log('[AbsenHRP] passkey-detect | isSecureContext:', window.isSecureContext,
+      '| PublicKeyCredential:', !!window.PublicKeyCredential,
+      '| supported:', supported,
+      '| userAgent:', navigator.userAgent.slice(0, 80));
+    setPasskeySupported(supported);
+  }, []);
+
+  // ── Load daftar passkey user ──────────────────────────────────
+  useEffect(() => {
+    if (!user || !db) return;
+    console.log('[AbsenHRP] passkey-card | uid=', user.uid,
+      '| dismissed=', passkeyCardDismissed,
+      '| supported=', passkeySupported,
+      '| passkeys=', passkeys.length);
+    console.log('[AbsenHRP] Query passkeys uid=', user.uid);
+    getDocs(
+      query(collection(db, 'passkeys'), where('uid', '==', user.uid), where('isActive', '==', true))
+    )
+    .then(snap => {
+      console.log('[AbsenHRP] Passkeys loaded:', snap.size, 'docs');
+      setPasskeys(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    })
+    .catch(err => {
+      // Non-fatal: Login Cepat tidak tersedia, tapi absen tetap berjalan
+      console.warn('[AbsenHRP] Passkeys query failed (fitur Login Cepat tidak tersedia):', err.code, err.message);
+    });
+  }, [user, db]);
+
+  // ── Aktivasi Login Cepat (register passkey) ───────────────────
+  const handleActivatePasskey = useCallback(async () => {
+    if (!auth.currentUser) return;
+    setPasskeyLoading(true);
+    try {
+      const idToken = await auth.currentUser.getIdToken();
+
+      // 1. Minta registration options
+      const startRes = await fetch('/api/passkey/register-start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken }),
+      });
+      if (!startRes.ok) {
+        const err = await startRes.json().catch(() => ({}));
+        throw new Error(err.error || 'Gagal memulai registrasi passkey.');
+      }
+      const { challengeId, ...regOptions } = await startRes.json();
+
+      // 2. Tampilkan prompt perangkat
+      const { startRegistration } = await import('@simplewebauthn/browser');
+      const response = await startRegistration({ optionsJSON: regOptions });
+
+      // 3. Kirim hasil ke server
+      const finishRes = await fetch('/api/passkey/register-finish', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idToken, challengeId, response }),
+      });
+      if (!finishRes.ok) {
+        const err = await finishRes.json().catch(() => ({}));
+        throw new Error(err.error || 'Registrasi passkey gagal.');
+      }
+
+      toast({ title: 'Login Cepat berhasil diaktifkan!', description: 'Anda kini bisa login lebih cepat menggunakan sidik jari, Face ID, atau PIN.' });
+
+      // Reload daftar passkey
+      console.log('[AbsenHRP] Reload passkeys setelah registrasi');
+      const snap = await getDocs(
+        query(collection(db, 'passkeys'), where('uid', '==', user!.uid), where('isActive', '==', true))
+      );
+      setPasskeys(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    } catch (err: any) {
+      const msg = err.name === 'NotAllowedError'
+        ? 'Dibatalkan. Silakan coba lagi.'
+        : err.message || 'Gagal mengaktifkan Login Cepat.';
+      toast({ variant: 'destructive', title: 'Gagal', description: msg });
+    } finally {
+      setPasskeyLoading(false);
+    }
+  }, [auth, db, user, toast]);
+
   // ── Site loader ────────────────────────────────────────────────
   useEffect(() => {
     if (userLoading || !user || !isAttendanceAllowed || !user.brandId) {
@@ -307,6 +400,7 @@ export default function AbsenPage() {
     setLoadingSites(true);
     (async () => {
       try {
+        console.log('[AbsenHRP] Query attendance_sites (isActive=true)');
         const snap = await getDocs(
           query(
             collection(db, "attendance_sites"),
@@ -380,6 +474,7 @@ export default function AbsenPage() {
   // ── Attendance event queries ───────────────────────────────────
   const historyQuery = useMemo(() => {
     if (!user?.uid || !isAttendanceAllowed) return null;
+    console.log('[AbsenHRP] Query attendance_events uid=', user.uid);
     return query(
       collection(db, "attendance_events"),
       where("uid", "==", user.uid),
@@ -716,7 +811,7 @@ export default function AbsenPage() {
           ctx.fillRect(0, y0 - lh, canvas.width, wmH + lh);
 
           ctx.textBaseline = "top";
-          let cy = y0 + Math.floor(lh * 0.5);
+          let cy = y0 + Math.floor(lh * 0.4);
 
           const write = (
             text: string,
@@ -728,26 +823,25 @@ export default function AbsenPage() {
             ctx.fillStyle = color;
             ctx.textAlign = "left";
             ctx.fillText(text, p, cy, canvas.width - p * 2);
-            cy += Math.floor(size * 1.4);
+            cy += Math.floor(size * 1.5);
           };
 
-          const zone = gps.insideRadius ? "ONSITE" : "OFFSITE";
-          const zoneC = gps.insideRadius ? "#22c55e" : "#f97316";
-          const eventType =
-            type === "IN" ? "KEHADIRAN MASUK" : "KEHADIRAN PULANG";
-          const badge = `${eventType}  ${zone}`;
-          ctx.font = `bold ${Math.floor(lh * 1.0)}px Inter,Arial,sans-serif`;
-          ctx.fillStyle = zoneC;
-          ctx.textAlign = "right";
-          ctx.fillText(badge, canvas.width - p, y0 + Math.floor(lh * 0.5));
-          ctx.textAlign = "left";
+          const zone  = gps.insideRadius ? "ONSITE" : "OFFSITE";
+          const zoneC = gps.insideRadius ? "#86efac" : "#fb923c";
+          const eventLabel = type === "IN" ? "KEHADIRAN MASUK" : "KEHADIRAN PULANG";
 
+          // Baris 0: label event kecil — tidak menimpa nama
+          write(eventLabel, Math.floor(lh * 0.68), "rgba(255,255,255,0.55)");
+
+          // Baris 1: Nama — paling menonjol, tidak ada elemen lain di baris ini
           write(
             user?.displayName?.toUpperCase() || "USER",
-            Math.floor(lh * 1.1),
+            Math.floor(lh * 1.05),
             "white",
             true,
           );
+
+          // Baris 2: EMP ID • Brand • Divisi
           const idLine = [
             user?.employeeId ? `EMP ${user.employeeId}` : null,
             user?.brandName,
@@ -755,24 +849,31 @@ export default function AbsenPage() {
           ]
             .filter(Boolean)
             .join("  •  ");
-          write(idLine, Math.floor(lh * 0.8), "rgba(255,255,255,0.85)");
-          write(wibString(now), Math.floor(lh * 0.88), "#93c5fd", true);
+          if (idLine) write(idLine, Math.floor(lh * 0.76), "rgba(255,255,255,0.82)");
 
+          // Baris 3: Tanggal dan jam
+          write(wibString(now), Math.floor(lh * 0.82), "#93c5fd", true);
+
+          // Baris 4: Lokasi/alamat
           const sa = addr ? shortAddr(addr) || addr.displayName : null;
-          if (sa) write(sa, Math.floor(lh * 0.74), "rgba(255,255,255,0.78)");
+          if (sa) write(sa, Math.floor(lh * 0.72), "rgba(255,255,255,0.76)");
 
+          // Baris 5: Koordinat dan akurasi GPS
           write(
-            `${gps.lat.toFixed(6)}, ${gps.lng.toFixed(6)}   ±${Math.round(gps.accuracyM)}m GPS`,
-            Math.floor(lh * 0.68),
-            "rgba(255,255,255,0.58)",
+            `${gps.lat.toFixed(6)}, ${gps.lng.toFixed(6)}   ±${Math.round(gps.accuracyM)}m`,
+            Math.floor(lh * 0.64),
+            "rgba(255,255,255,0.52)",
           );
 
+          // Baris 6: Jarak ke site + status ONSITE/OFFSITE
           if (gps.distanceToSiteM !== null && activeSite) {
             write(
-              `Jarak ke ${activeSite.name}: ${Math.round(gps.distanceToSiteM)}m`,
-              Math.floor(lh * 0.68),
-              "rgba(255,255,255,0.58)",
+              `Jarak ke ${activeSite.name}: ${Math.round(gps.distanceToSiteM)}m   •   ${zone}`,
+              Math.floor(lh * 0.66),
+              zoneC,
             );
+          } else {
+            write(zone, Math.floor(lh * 0.66), zoneC);
           }
 
           resolve(canvas.toDataURL("image/jpeg", 0.82));
@@ -1649,6 +1750,151 @@ export default function AbsenPage() {
               </div>
             </div>
 
+            {/* ── Login Cepat card — tepat setelah card Hari Ini ──────── */}
+            {/* Render setelah passkeySupported dicek (bukan null) dan user login */}
+            {!!user && !passkeyCardDismissed && passkeySupported !== null && (() => {
+              const shouldShow = true;
+              console.log('[AbsenHRP] passkey-card render | uid=', user.uid,
+                '| hasPasskey=', passkeys.length > 0,
+                '| supported=', passkeySupported,
+                '| shouldShow=', shouldShow,
+                '| isSecureContext=', typeof window !== 'undefined' ? window.isSecureContext : 'SSR');
+
+              // ── Sudah aktif ────────────────────────────────────
+              if (passkeys.length > 0) {
+                return (
+                  <div className="w-full rounded-2xl border border-green-200 bg-green-50 px-3.5 py-3">
+                    <div className="flex items-center gap-2.5">
+                      <div className="w-8 h-8 rounded-xl bg-green-100 flex items-center justify-center shrink-0">
+                        <ShieldCheck className="w-4 h-4 text-green-600" />
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-[11px] font-bold text-green-800 leading-tight">Login Cepat Aktif</p>
+                        <p className="text-[9px] text-green-700 leading-relaxed">
+                          Perangkat ini sudah bisa digunakan untuk masuk dengan sidik jari, Face ID, Windows Hello, atau PIN.
+                        </p>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          onClick={() => setShowPasskeyManage(v => !v)}
+                          className="text-[9px] font-bold text-green-700 bg-green-100 hover:bg-green-200 rounded-lg px-2.5 py-1.5 transition-colors"
+                        >
+                          Kelola
+                        </button>
+                        <button
+                          onClick={() => setPasskeyCardDismissed(true)}
+                          className="text-green-400 hover:text-green-600 p-1"
+                          aria-label="Tutup"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                    {showPasskeyManage && (
+                      <div className="mt-3 border-t border-green-200 pt-3 space-y-2">
+                        {passkeys.map(pk => (
+                          <div key={pk.id} className="flex items-center gap-2 text-[9px]">
+                            <Fingerprint className="w-3 h-3 text-green-500 shrink-0" />
+                            <div>
+                              <p className="font-bold text-green-800">{pk.deviceName || 'Perangkat'}</p>
+                              <p className="text-green-600">
+                                Didaftarkan {pk.createdAt?.toDate
+                                  ? format(pk.createdAt.toDate(), 'dd MMM yyyy', { locale: localeId })
+                                  : '-'}
+                              </p>
+                            </div>
+                          </div>
+                        ))}
+                        <button
+                          onClick={handleActivatePasskey}
+                          disabled={passkeyLoading}
+                          className="flex items-center gap-1 text-[9px] text-teal-700 font-semibold underline underline-offset-2 disabled:opacity-40"
+                        >
+                          {passkeyLoading ? <Loader2 className="w-3 h-3 animate-spin" /> : <Fingerprint className="w-3 h-3" />}
+                          Tambah passkey perangkat lain
+                        </button>
+                        <p className="text-[8px] text-green-600/60 italic">
+                          Login Cepat perlu diaktifkan pada setiap perangkat yang digunakan.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                );
+              }
+
+              // ── Tidak support / HTTP non-secure ───────────────
+              if (!passkeySupported) {
+                return (
+                  <div className="w-full rounded-2xl border border-slate-200 bg-slate-50 px-3.5 py-3 flex items-start gap-2.5">
+                    <div className="w-8 h-8 rounded-xl bg-slate-100 flex items-center justify-center shrink-0">
+                      <Fingerprint className="w-4 h-4 text-slate-400" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[11px] font-semibold text-slate-600">Login Cepat Tidak Tersedia</p>
+                      <p className="text-[9px] text-slate-400 mt-0.5 leading-relaxed">
+                        {typeof window !== 'undefined' && !window.isSecureContext
+                          ? 'Login Cepat membutuhkan koneksi HTTPS. Buka aplikasi melalui URL resmi yang aman.'
+                          : 'Browser atau perangkat ini belum mendukung Login Cepat (WebAuthn).'}
+                      </p>
+                    </div>
+                    <button
+                      onClick={() => setPasskeyCardDismissed(true)}
+                      className="text-slate-300 hover:text-slate-500 p-1 shrink-0"
+                      aria-label="Tutup"
+                    >
+                      <X className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                );
+              }
+
+              // ── Belum aktif — ajak daftar ─────────────────────
+              return (
+                <div className="w-full rounded-2xl border-2 border-teal-300 bg-teal-50 px-3.5 py-3">
+                  <div className="flex items-start gap-2.5">
+                    <div className="w-9 h-9 rounded-xl bg-teal-600 flex items-center justify-center shrink-0 shadow-sm">
+                      <Fingerprint className="w-5 h-5 text-white" />
+                    </div>
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <p className="text-[13px] font-black text-teal-900 leading-tight">Aktifkan Login Cepat</p>
+                          <p className="text-[9px] text-teal-700 mt-0.5 leading-relaxed">
+                            Gunakan sidik jari, Face ID, Windows Hello, atau PIN perangkat untuk login absen lebih cepat.
+                          </p>
+                        </div>
+                        <button
+                          onClick={() => setPasskeyCardDismissed(true)}
+                          className="text-teal-400 hover:text-teal-700 p-1 shrink-0 -mt-0.5"
+                          aria-label="Nanti saja"
+                        >
+                          <X className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                      <div className="mt-2.5 flex items-center gap-3">
+                        <button
+                          onClick={handleActivatePasskey}
+                          disabled={passkeyLoading}
+                          className="flex items-center gap-1.5 text-[10px] font-bold text-white bg-teal-600 hover:bg-teal-700 active:bg-teal-800 rounded-xl px-4 py-2 transition-colors disabled:opacity-50 shadow-sm"
+                        >
+                          {passkeyLoading
+                            ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Mendaftarkan…</>
+                            : <><Fingerprint className="w-3.5 h-3.5" /> Daftarkan Sekarang</>
+                          }
+                        </button>
+                        <button
+                          onClick={() => setPasskeyCardDismissed(true)}
+                          className="text-[9px] text-teal-600/70 hover:text-teal-900 font-medium"
+                        >
+                          Nanti Saja
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* ── Kartu Kehadiran Masuk / Pulang ─────────────────────── */}
             <div className="grid grid-cols-2 gap-3">
               {/* Kehadiran Masuk card */}
@@ -1786,7 +2032,7 @@ export default function AbsenPage() {
                 </div>
               </div>
 
-              {/* B. Alur Kehadiran */}
+              {/* C. Alur Kehadiran */}
               <div className="bg-white rounded-2xl border shadow-sm p-3">
                 <p className="text-[9px] font-black text-muted-foreground uppercase mb-2">
                   Alur Kehadiran
@@ -1827,7 +2073,7 @@ export default function AbsenPage() {
                 </div>
               </div>
 
-              {/* C. Aktivitas Terakhir */}
+              {/* D. Aktivitas Terakhir */}
               <div className="bg-white rounded-2xl border shadow-sm p-3">
                 <p className="text-[9px] font-black text-muted-foreground uppercase mb-2">
                   Aktivitas Terakhir
@@ -1879,7 +2125,7 @@ export default function AbsenPage() {
                 </div>
               </div>
 
-              {/* D. Informasi Singkat */}
+              {/* E. Informasi Singkat */}
               <div className="bg-muted/5 rounded-2xl border p-3 text-[12px] text-muted-foreground">
                 Pastikan lokasi aktif dan wajah terlihat jelas saat mengambil
                 foto kehadiran.
