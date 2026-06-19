@@ -8,7 +8,7 @@
 
 import { initializeApp, getApps, getApp, FirebaseApp } from 'firebase/app';
 import { getFirestore, Firestore } from 'firebase/firestore';
-import { getAuth, Auth } from 'firebase/auth';
+import { getAuth, Auth, browserLocalPersistence, setPersistence } from 'firebase/auth';
 import { firebaseConfig } from './config';
 
 export function initializeFirebase(): {
@@ -17,12 +17,16 @@ export function initializeFirebase(): {
   auth: Auth;
 } {
   const firebaseApp = getApps().length > 0 ? getApp() : initializeApp(firebaseConfig);
-  const firestore = getFirestore(firebaseApp);
-  const auth = getAuth(firebaseApp);
+  const firestore   = getFirestore(firebaseApp);
+  const auth        = getAuth(firebaseApp);
 
-  // Debug log untuk verifikasi projectId saat runtime
+  // Paksa persistence local (localStorage) agar session tetap aktif setelah tutup tab/browser.
+  // Logout hanya saat user klik logout atau token expired.
+  // Tidak perlu await — Firebase queue operasi ini sebelum request lain.
   if (typeof window !== 'undefined') {
-    console.log("[Firebase] projectId:", firebaseApp.options.projectId);
+    setPersistence(auth, browserLocalPersistence).catch(() => {
+      // Silent — jika gagal (private browsing?), fallback ke default session persistence.
+    });
   }
 
   return { firebaseApp, firestore, auth };

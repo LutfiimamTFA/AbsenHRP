@@ -2,42 +2,51 @@
 
 import React, { useState, useEffect } from 'react';
 import { useRouter } from 'next/navigation';
-import { signInWithEmailAndPassword, signInWithCustomToken } from 'firebase/auth';
+import { signInWithEmailAndPassword } from 'firebase/auth';
 import { useAuth, useUser } from '@/firebase';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
-import { LogIn, Fingerprint, Loader2, Eye, EyeOff } from 'lucide-react';
+import { LogIn, Loader2, Eye, EyeOff } from 'lucide-react';
 import { useToast } from '@/hooks/use-toast';
+
+const REMEMBERED_EMAIL_KEY = 'hrp_remembered_email';
 
 export default function LoginPage() {
   const [email, setEmail]           = useState('');
   const [password, setPassword]     = useState('');
   const [showPw, setShowPw]         = useState(false);
+  const [rememberEmail, setRememberEmail] = useState(true);
   const [submitting, setSubmitting] = useState(false);
-  const [passkeyLoading, setPasskeyLoading]     = useState(false);
-  const [passkeySupported, setPasskeySupported] = useState(false);
 
   const router    = useRouter();
   const { toast } = useToast();
   const auth      = useAuth();
   const { user, loading } = useUser();
 
+  // Isi email dari localStorage saat halaman dibuka
+  useEffect(() => {
+    const saved = localStorage.getItem(REMEMBERED_EMAIL_KEY);
+    if (saved) setEmail(saved);
+  }, []);
+
+  // Redirect ke /absen jika sudah login
   useEffect(() => {
     if (!loading && user) router.push('/absen');
   }, [user, loading, router]);
 
-  useEffect(() => {
-    if (typeof window !== 'undefined' && window.PublicKeyCredential) {
-      setPasskeySupported(true);
-    }
-  }, []);
-
-  // ── Login email & password ────────────────────────────────────────────────
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
     setSubmitting(true);
     try {
       await signInWithEmailAndPassword(auth, email, password);
+
+      // Simpan atau hapus email sesuai pilihan user
+      if (rememberEmail && email) {
+        localStorage.setItem(REMEMBERED_EMAIL_KEY, email);
+      } else {
+        localStorage.removeItem(REMEMBERED_EMAIL_KEY);
+      }
+
       router.push('/absen');
     } catch (error: any) {
       const msg =
@@ -54,53 +63,6 @@ export default function LoginPage() {
     }
   };
 
-  // ── Login Cepat (Passkey/WebAuthn) ────────────────────────────────────────
-  const handlePasskeyLogin = async () => {
-    if (!passkeySupported) {
-      toast({
-        title: 'Login Cepat tidak tersedia',
-        description: 'Perangkat ini belum mendukung Login Cepat. Silakan masuk dengan email dan password.',
-      });
-      return;
-    }
-    setPasskeyLoading(true);
-    try {
-      const startRes = await fetch('/api/passkey/auth-start', { method: 'POST' });
-      if (!startRes.ok) {
-        const err = await startRes.json().catch(() => ({}));
-        throw new Error(err.error || 'Gagal memulai Login Cepat.');
-      }
-      const { challengeId, ...authOptions } = await startRes.json();
-
-      const { startAuthentication } = await import('@simplewebauthn/browser');
-      const response = await startAuthentication({ optionsJSON: authOptions });
-
-      const finishRes = await fetch('/api/passkey/auth-finish', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ challengeId, response }),
-      });
-      if (!finishRes.ok) {
-        const err = await finishRes.json().catch(() => ({}));
-        throw new Error(err.error || 'Verifikasi gagal.');
-      }
-      const { customToken } = await finishRes.json();
-
-      await signInWithCustomToken(auth, customToken);
-      router.push('/absen');
-    } catch (error: any) {
-      const msg =
-        error.name === 'NotAllowedError'
-          ? 'Dibatalkan. Silakan coba lagi.'
-          : error.name === 'NotSupportedError'
-          ? 'Perangkat ini tidak mendukung Passkey.'
-          : error.message || 'Login Cepat gagal. Coba masuk dengan email dan password.';
-      toast({ variant: 'destructive', title: 'Login Cepat gagal', description: msg });
-    } finally {
-      setPasskeyLoading(false);
-    }
-  };
-
   if (loading) return null;
 
   return (
@@ -108,7 +70,6 @@ export default function LoginPage() {
       className="min-h-svh flex flex-col items-center justify-center p-4"
       style={{ background: 'linear-gradient(135deg, #0f172a 0%, #134e4a 60%, #0f766e 100%)' }}
     >
-      {/* Card utama */}
       <div className="w-full max-w-sm bg-white rounded-3xl shadow-2xl overflow-hidden">
 
         {/* Header branding */}
@@ -126,9 +87,8 @@ export default function LoginPage() {
           <p className="text-sm text-teal-200 mt-0.5 font-medium">Human Capital Portal</p>
         </div>
 
-        {/* Form area */}
-        <div className="px-6 pt-6 pb-5 space-y-3">
-
+        {/* Form */}
+        <form onSubmit={handleLogin} className="px-6 pt-6 pb-6 space-y-3">
           {/* Email */}
           <Input
             type="email"
@@ -137,11 +97,11 @@ export default function LoginPage() {
             value={email}
             onChange={(e) => setEmail(e.target.value)}
             required
-            disabled={submitting || passkeyLoading}
+            disabled={submitting}
             className="h-12 rounded-xl text-sm border-slate-200 focus-visible:ring-teal-500"
           />
 
-          {/* Password dengan toggle show/hide */}
+          {/* Password */}
           <div className="relative">
             <Input
               type={showPw ? 'text' : 'password'}
@@ -150,7 +110,7 @@ export default function LoginPage() {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               required
-              disabled={submitting || passkeyLoading}
+              disabled={submitting}
               className="h-12 rounded-xl text-sm border-slate-200 focus-visible:ring-teal-500 pr-11"
             />
             <button
@@ -158,63 +118,41 @@ export default function LoginPage() {
               tabIndex={-1}
               onClick={() => setShowPw(v => !v)}
               className="absolute right-3 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-1"
+              aria-label={showPw ? 'Sembunyikan password' : 'Tampilkan password'}
             >
               {showPw ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
           </div>
 
-          {/* Baris aksi: [Masuk (flex-1)] [Sidik Jari (kotak)] */}
-          <form onSubmit={handleLogin}>
-            <div className="flex gap-2">
-              {/* Tombol Masuk utama */}
-              <Button
-                type="submit"
-                disabled={submitting || passkeyLoading}
-                className="flex-1 h-12 rounded-xl text-sm font-semibold gap-2 bg-slate-800 hover:bg-slate-700 active:bg-slate-900 text-white"
-              >
-                {submitting
-                  ? <><Loader2 className="w-4 h-4 animate-spin" />Masuk…</>
-                  : <><LogIn className="w-4 h-4" />Masuk</>
-                }
-              </Button>
+          {/* Checkbox ingat email */}
+          <label className="flex items-center gap-2 cursor-pointer select-none">
+            <input
+              type="checkbox"
+              checked={rememberEmail}
+              onChange={(e) => setRememberEmail(e.target.checked)}
+              disabled={submitting}
+              className="w-4 h-4 rounded accent-teal-600 cursor-pointer"
+            />
+            <span className="text-[11px] text-slate-500">Ingat email saya</span>
+          </label>
 
-              {/* Tombol Login Cepat — icon sidik jari, selalu tampil */}
-              <button
-                type="button"
-                onClick={handlePasskeyLogin}
-                disabled={submitting || passkeyLoading}
-                title="Login Cepat (sidik jari / Face ID / PIN)"
-                aria-label="Login Cepat"
-                className="w-12 h-12 rounded-xl flex flex-col items-center justify-center gap-0.5 border-2 transition-all active:scale-95 disabled:opacity-40"
-                style={{
-                  borderColor: '#0f766e',
-                  background: passkeyLoading ? '#0f766e10' : 'transparent',
-                  color: '#0f766e',
-                  minWidth: '3rem',
-                  flexShrink: 0,
-                }}
-              >
-                {passkeyLoading
-                  ? <Loader2 className="w-5 h-5 animate-spin" />
-                  : <Fingerprint className="w-5 h-5" />
-                }
-                <span className="text-[7px] font-bold leading-none tracking-tight">
-                  {passkeyLoading ? '…' : 'Cepat'}
-                </span>
-              </button>
-            </div>
-          </form>
-        </div>
+          {/* Tombol masuk */}
+          <Button
+            type="submit"
+            disabled={submitting}
+            className="w-full h-12 rounded-xl text-sm font-semibold gap-2 bg-teal-700 hover:bg-teal-600 active:bg-teal-800 text-white mt-1"
+          >
+            {submitting
+              ? <><Loader2 className="w-4 h-4 animate-spin" />Masuk…</>
+              : <><LogIn className="w-4 h-4" />Masuk</>
+            }
+          </Button>
 
-        {/* Footer info */}
-        <div className="px-6 pb-6">
-          <p className="text-center text-[9px] text-slate-400 leading-relaxed">
-            <Fingerprint className="inline w-2.5 h-2.5 mb-px mr-0.5 opacity-60" />
-            Login Cepat: sidik jari, Face ID, Windows Hello, atau PIN perangkat
-            <br />
-            Perlu diaktifkan pada setiap perangkat yang digunakan
+          {/* Hint password manager */}
+          <p className="text-center text-[9px] text-slate-400 leading-relaxed pt-1">
+            Gunakan password manager browser agar login berikutnya lebih cepat.
           </p>
-        </div>
+        </form>
       </div>
 
       <p className="mt-5 text-[10px] text-teal-300/40 text-center">
