@@ -84,17 +84,16 @@ service cloud.firestore {
 
 
     // ── passkeys/{credentialId} ───────────────────────────────────────────────
-    // Collection untuk Login Cepat (Passkey/WebAuthn).
+    // Collection global (top-level) untuk Login Cepat / Passkey WebAuthn.
     // Tulis hanya via Firebase Admin SDK (API route server-side) → admin bypass rules.
-    // Client hanya perlu READ untuk menampilkan status "sudah aktif / belum".
+    // Client hanya perlu READ untuk mengecek apakah sudah punya passkey aktif.
+    //
+    // Query client: collection('passkeys').where('uid','==',uid).where('isActive','==',true)
+    // → Firestore evaluasi resource.data.uid per dokumen, rule terpenuhi karena
+    //   query sudah membatasi uid == request.auth.uid.
     match /passkeys/{credentialId} {
-      // get (baca 1 dokumen): pastikan field uid cocok
-      allow get: if isSignedIn() && resource.data.uid == request.auth.uid;
-      // list (query): izinkan jika user query passkey-nya sendiri
-      // Client wajib kirim where('uid', '==', auth.uid) agar setiap dokumen hasil query
-      // memenuhi resource.data.uid == request.auth.uid
+      allow get:  if isSignedIn() && resource.data.uid == request.auth.uid;
       allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
-      // Tulis dari client dilarang — hanya lewat Admin SDK
       allow write: if false;
     }
 

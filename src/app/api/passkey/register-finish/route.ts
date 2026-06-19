@@ -65,9 +65,12 @@ export async function POST(req: NextRequest) {
     }
 
     const { credential } = registrationInfo;
-    const credentialId   = Buffer.from(credential.id).toString('base64url');
-    const publicKey      = Buffer.from(credential.publicKey).toString('base64url');
-    const transports     = (response.response?.transports as string[] | undefined) ?? [];
+    // credential.id dari @simplewebauthn/server v13 sudah berupa Base64URLString (string).
+    // Jangan re-encode — Buffer.from(string).toString('base64url') akan mengubah nilainya.
+    // auth-finish membaca response.id langsung dari browser (juga Base64URLString) → harus sama.
+    const credentialId = credential.id; // Base64URLString, pakai langsung sebagai doc ID
+    const publicKey    = Buffer.from(credential.publicKey).toString('base64url'); // Uint8Array → base64url
+    const transports   = (response.response?.transports as string[] | undefined) ?? [];
 
     // Simpan passkey di Firestore (via Admin SDK — bypass security rules)
     await db.collection('passkeys').doc(credentialId).set({
