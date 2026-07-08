@@ -43,6 +43,7 @@ import {
   ShieldAlert,
   X,
   CalendarDays,
+  Bell,
 } from "lucide-react";
 import { useToast } from "@/hooks/use-toast";
 import {
@@ -67,6 +68,9 @@ type TapStep =
   | "submitting"
   | "success";
 
+type LocationStatus = 'inside_radius' | 'gps_uncertain' | 'outside_radius' | 'gps_low_accuracy' | 'unknown';
+type LocationConfidence = 'high' | 'medium' | 'low';
+
 interface LiveLocation {
   lat: number;
   lng: number;
@@ -85,7 +89,31 @@ interface TapGpsData {
   speed: number | null;
   distanceToSiteM: number | null;
   insideRadius: boolean;
+  locationStatus: LocationStatus;
+  locationConfidence: LocationConfidence;
   capturedAt: Date;
+}
+
+// ─── Location evaluator ────────────────────────────────────────────────────────
+
+function evaluateLocation(
+  distanceM: number | null,
+  radiusM: number,
+  gpsAccuracy: number,
+): { locationStatus: LocationStatus; locationConfidence: LocationConfidence; needsHrdReview: boolean; insideRadius: boolean } {
+  if (distanceM === null) {
+    return { locationStatus: 'unknown', locationConfidence: 'low', needsHrdReview: true, insideRadius: false };
+  }
+  if (gpsAccuracy > 100) {
+    return { locationStatus: 'gps_low_accuracy', locationConfidence: 'low', needsHrdReview: true, insideRadius: false };
+  }
+  if (distanceM <= radiusM) {
+    return { locationStatus: 'inside_radius', locationConfidence: 'high', needsHrdReview: false, insideRadius: true };
+  }
+  if (distanceM <= radiusM + gpsAccuracy) {
+    return { locationStatus: 'gps_uncertain', locationConfidence: 'medium', needsHrdReview: true, insideRadius: false };
+  }
+  return { locationStatus: 'outside_radius', locationConfidence: 'low', needsHrdReview: true, insideRadius: false };
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -186,12 +214,9 @@ const FLAG_LABELS: Record<string, { label: string; color: string }> = {
 
 // ─── Step pills ───────────────────────────────────────────────────────────────
 
-function StepPills({ current, isOut = false }: { current: number; isOut?: boolean }) {
-  // IN: Lokasi → Foto → Preview → Kirim
-  // OUT: Lokasi → Konfirmasi → Kirim
-  const steps = isOut
-    ? ["Lokasi", "Konfirmasi", "Kirim"]
-    : ["Lokasi", "Foto", "Preview", "Kirim"];
+function StepPills({ current }: { current: number }) {
+  // IN & OUT: Lokasi → Foto → Preview → Kirim
+  const steps = ["Lokasi", "Foto", "Preview", "Kirim"];
   return (
     <div className="flex items-center gap-1.5 text-[8px] font-bold uppercase justify-center py-3">
       {steps.map((label, i) => (
@@ -237,6 +262,10 @@ export default function AbsenPage() {
     locationRef.current = liveLocation;
   }, [liveLocation]);
 
+  // Reverse geocode live location (cached — only re-geocode if moved >30 m)
+  const [liveAddress, setLiveAddress] = useState<AddressDetail | null>(null);
+  const lastGeocodedRef = useRef<{ lat: number; lng: number } | null>(null);
+
   const [sites, setSites] = useState<any[]>([]);
   const [activeSite, setActiveSite] = useState<any>(null);
   const [loadingSites, setLoadingSites] = useState(true);
@@ -249,6 +278,26 @@ export default function AbsenPage() {
   const [tapAddress, setTapAddress] = useState<AddressDetail | null>(null);
   const [tapPhoto, setTapPhoto] = useState<string | null>(null);
   const [tapFlags, setTapFlags] = useState<string[]>([]);
+  // Condition report (lapor kondisi khusus — terpisah dari flow absen)
+  const [conditionStep, setConditionStep] = useState<'idle' | 'form' | 'camera' | 'submitting'>('idle');
+  const [conditionType, setConditionType] = useState<'check_in' | 'check_out'>('check_in');
+  const [conditionReason, setConditionReason] = useState<string>('');
+  const [conditionNote, setConditionNote] = useState<string>('');
+  const [conditionPhoto, setConditionPhoto] = useState<string | null>(null);
+  const [todayConditionReports, setTodayConditionReports] = useState<any[]>([]);
+  const [loadingConditionReports, setLoadingConditionReports] = useState(false);
+  // Push notification
+  type NotifPermission = 'default' | 'granted' | 'denied' | 'unsupported' | 'loading';
+  const [notifPermission, setNotifPermission] = useState<NotifPermission>('default');
+  const [notifSubscribed, setNotifSubscribed] = useState(false);
+  const [notifLoading, setNotifLoading] = useState(false);
+
+  // PWA install
+  const [deferredPrompt, setDeferredPrompt]   = useState<any>(null);
+  const [canInstallApp, setCanInstallApp]     = useState(false);
+  const [isInstalled, setIsInstalled]         = useState(false);
+  const [isIosBrowser, setIsIosBrowser]       = useState(false);
+  const [showInstallGuide, setShowInstallGuide] = useState(false);
 
   // History filters
   const [historyFilterMode, setHistoryFilterMode] = useState<
@@ -269,13 +318,23 @@ export default function AbsenPage() {
   const [statusFilter, setStatusFilter] = useState("all");
 
 
-  // Photo modal state
+  // Photo modal state (selfie kehadiran)
   const [photoModal, setPhotoModal] = useState<{
     fileId: string;
     date: string;
     dateLabel: string;
     checkInTime: string | null;
   } | null>(null);
+
+  // Condition proof photo modal
+  const [conditionPhotoModal, setConditionPhotoModal] = useState<{
+    report: any;
+    fileId: string | null;
+    directUrl: string | null;
+  } | null>(null);
+
+  // Fetching condition report detail from history card (lazy)
+  const [fetchingConditionId, setFetchingConditionId] = useState<string | null>(null);
 
   // ── Access control ─────────────────────────────────────────────
   const isAttendanceAllowed = useMemo(
@@ -298,6 +357,58 @@ export default function AbsenPage() {
     if (!user) router.push("/login");
     else if (user.role === "kandidat") router.push("/unauthorized");
   }, [user, userLoading, router]);
+
+  // ── PWA install prompt ────────────────────────────────────────
+  useEffect(() => {
+    // Deteksi sudah standalone (sudah diinstall)
+    const standalone =
+      window.matchMedia('(display-mode: standalone)').matches ||
+      (navigator as any).standalone === true;
+    if (standalone) { setIsInstalled(true); }
+
+    // Deteksi iOS
+    const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    setIsIosBrowser(ios);
+
+    const handleBefore = (e: any) => {
+      e.preventDefault();
+      setDeferredPrompt(e);
+      setCanInstallApp(true);
+    };
+    const handleInstalled = () => {
+      setIsInstalled(true);
+      setCanInstallApp(false);
+      setDeferredPrompt(null);
+    };
+
+    window.addEventListener('beforeinstallprompt', handleBefore);
+    window.addEventListener('appinstalled', handleInstalled);
+
+    if ('serviceWorker' in navigator) {
+      navigator.serviceWorker.register('/sw.js').catch(() => {});
+    }
+
+    return () => {
+      window.removeEventListener('beforeinstallprompt', handleBefore);
+      window.removeEventListener('appinstalled', handleInstalled);
+    };
+  }, []);
+
+  // ── Push notification: init permission status ─────────────────
+  useEffect(() => {
+    if (typeof Notification === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setNotifPermission('unsupported');
+      return;
+    }
+    const perm = Notification.permission as NotifPermission;
+    setNotifPermission(perm);
+    if (perm === 'granted') {
+      // Cek apakah ada subscription aktif
+      navigator.serviceWorker.ready.then(reg => reg.pushManager.getSubscription()).then(sub => {
+        setNotifSubscribed(!!sub);
+      }).catch(() => {});
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   // ── Site loader ────────────────────────────────────────────────
   useEffect(() => {
@@ -337,6 +448,20 @@ export default function AbsenPage() {
     })();
   }, [db, user, userLoading, isAttendanceAllowed, toast]);
 
+  // ── Condition reports hari ini ─────────────────────────────────
+  useEffect(() => {
+    if (!user?.uid || !isAttendanceAllowed) return;
+    const todayStr = format(new Date(), "yyyy-MM-dd");
+    setLoadingConditionReports(true);
+    getDocs(query(
+      collection(db, "attendance_condition_reports"),
+      where("uid", "==", user.uid),
+      where("reportDate", "==", todayStr),
+    )).then(snap => {
+      setTodayConditionReports(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }).catch(() => {}).finally(() => setLoadingConditionReports(false));
+  }, [db, user?.uid, isAttendanceAllowed]);
+
   // ── Live GPS watch ─────────────────────────────────────────────
   useEffect(() => {
     if (!isAttendanceAllowed) return;
@@ -356,6 +481,20 @@ export default function AbsenPage() {
     return () => navigator.geolocation.clearWatch(id);
   }, [isAttendanceAllowed]);
 
+  // Reverse geocode live location when it moves >30 m
+  useEffect(() => {
+    if (!liveLocation) return;
+    const last = lastGeocodedRef.current;
+    if (last) {
+      const d = getDistance(liveLocation.lat, liveLocation.lng, last.lat, last.lng);
+      if (d < 30) return;
+    }
+    lastGeocodedRef.current = { lat: liveLocation.lat, lng: liveLocation.lng };
+    getDetailedAddress(liveLocation.lat, liveLocation.lng)
+      .then(addr => setLiveAddress(addr))
+      .catch(() => {});
+  }, [liveLocation]);
+
   // ── Active site resolver ───────────────────────────────────────
   useEffect(() => {
     if (!liveLocation || !sites.length) {
@@ -365,16 +504,12 @@ export default function AbsenPage() {
     let closest: any = null,
       minD = Infinity;
     sites.forEach((s) => {
-      const d = getDistance(
-        liveLocation.lat,
-        liveLocation.lng,
-        s.office.lat,
-        s.office.lng,
-      );
-      if (d < minD) {
-        minD = d;
-        closest = s;
-      }
+      // Support both flat {lat,lng} and nested {office:{lat,lng}}
+      const siteLat = s.lat ?? s.office?.lat;
+      const siteLng = s.lng ?? s.office?.lng;
+      if (siteLat == null || siteLng == null) return;
+      const d = getDistance(liveLocation.lat, liveLocation.lng, siteLat, siteLng);
+      if (d < minD) { minD = d; closest = s; }
     });
     setActiveSite(closest);
   }, [liveLocation, sites]);
@@ -656,28 +791,36 @@ export default function AbsenPage() {
   // ── Status calculator ──────────────────────────────────────────
   const calculateStatus = useCallback(
     (type: "IN" | "OUT", now: Date, site: any) => {
-      if (!site?.shift) return { status: "NORMAL", lateMinutes: 0 };
-      const { startTime, endTime, graceLateMinutes } = site.shift;
+      if (!site?.shift) return {
+        status: "NORMAL", lateMinutes: 0,
+        scheduledCheckIn: null, allowedCheckInTime: null,
+      };
+      const startTime        = site.shift.startTime        || site.shift.jamMasuk        || "08:00";
+      const endTime          = site.shift.endTime          || site.shift.jamPulang        || "17:00";
+      const graceLateMinutes = site.shift.graceLateMinutes ?? site.shift.batasTelatMenit ?? 0;
+
       const [sh, sm] = startTime.split(":").map(Number);
       const [eh, em] = endTime.split(":").map(Number);
-      const sched = new Date(now);
-      sched.setHours(sh, sm, 0, 0);
-      const schedEnd = new Date(now);
-      schedEnd.setHours(eh, em, 0, 0);
+
+      const sched = new Date(now); sched.setHours(sh, sm, 0, 0);
+      const grace = new Date(sched.getTime() + graceLateMinutes * 60000);
+      const schedEnd = new Date(now); schedEnd.setHours(eh, em, 0, 0);
+
+      const scheduledCheckIn  = `${String(sh).padStart(2,'0')}:${String(sm).padStart(2,'0')}`;
+      const allowedH = grace.getHours(), allowedM = grace.getMinutes();
+      const allowedCheckInTime = `${String(allowedH).padStart(2,'0')}:${String(allowedM).padStart(2,'0')}`;
+
       if (type === "IN") {
-        const grace = new Date(
-          sched.getTime() + (graceLateMinutes || 0) * 60000,
-        );
-        if (now > grace)
-          return {
-            status: "LATE",
-            lateMinutes: Math.ceil((now.getTime() - sched.getTime()) / 60000),
-          };
-        return { status: "ON_TIME", lateMinutes: 0 };
+        if (now > grace) {
+          // lateMinutes = selisih dari allowedCheckInTime, bukan dari scheduledCheckIn
+          const lateMinutes = Math.ceil((now.getTime() - grace.getTime()) / 60000);
+          return { status: "LATE", lateMinutes, scheduledCheckIn, allowedCheckInTime };
+        }
+        return { status: "ON_TIME", lateMinutes: 0, scheduledCheckIn, allowedCheckInTime };
       }
       return now < schedEnd
-        ? { status: "EARLY_LEAVE", lateMinutes: 0 }
-        : { status: "ON_TIME", lateMinutes: 0 };
+        ? { status: "EARLY_LEAVE", lateMinutes: 0, scheduledCheckIn: null, allowedCheckInTime: null }
+        : { status: "ON_TIME",     lateMinutes: 0, scheduledCheckIn: null, allowedCheckInTime: null };
     },
     [],
   );
@@ -797,20 +940,18 @@ export default function AbsenPage() {
       setTapTime(capturedAt);
 
       let distToSite: number | null = null;
-      let inside = false;
-      if (activeSite?.office) {
-        distToSite = getDistance(
-          loc.lat,
-          loc.lng,
-          activeSite.office.lat,
-          activeSite.office.lng,
-        );
-        inside = distToSite <= (activeSite.radiusM || 150);
+      const siteLat = activeSite?.lat ?? activeSite?.office?.lat;
+      const siteLng = activeSite?.lng ?? activeSite?.office?.lng;
+      if (siteLat != null && siteLng != null) {
+        distToSite = getDistance(loc.lat, loc.lng, siteLat, siteLng);
       }
 
+      const eval_ = evaluateLocation(distToSite, activeSite?.radiusM || 150, loc.accuracy);
+
       const flags: string[] = [];
-      if (loc.accuracy > 100) flags.push("gps_low_accuracy");
-      if (!inside && activeSite) flags.push("outside_radius");
+      if (eval_.locationStatus === 'gps_low_accuracy') flags.push("gps_low_accuracy");
+      if (eval_.locationStatus === 'outside_radius') flags.push("outside_radius");
+      if (eval_.locationStatus === 'gps_uncertain') flags.push("gps_uncertain");
 
       setTapGps({
         lat: loc.lat,
@@ -820,7 +961,9 @@ export default function AbsenPage() {
         heading: loc.heading,
         speed: loc.speed,
         distanceToSiteM: distToSite,
-        insideRadius: inside,
+        insideRadius: eval_.insideRadius,
+        locationStatus: eval_.locationStatus,
+        locationConfidence: eval_.locationConfidence,
         capturedAt,
       });
       setTapFlags(flags);
@@ -887,6 +1030,143 @@ export default function AbsenPage() {
     [isAttendanceAllowed, isFinished, proceedWithLocation, toast],
   );
 
+  // ── PWA install handler ────────────────────────────────────────
+  const handleInstallApp = useCallback(async () => {
+    if (isInstalled) {
+      toast({ title: 'Sudah terpasang', description: 'Web Absen sudah terpasang sebagai aplikasi di perangkat ini.' });
+      return;
+    }
+    if (deferredPrompt) {
+      deferredPrompt.prompt();
+      const { outcome } = await deferredPrompt.userChoice;
+      if (outcome === 'accepted') {
+        toast({ title: 'Berhasil dipasang', description: 'Web Absen berhasil dipasang ke layar utama.' });
+      }
+      setDeferredPrompt(null);
+      setCanInstallApp(false);
+      return;
+    }
+    // iOS atau browser tanpa dukungan prompt
+    setShowInstallGuide(true);
+  }, [isInstalled, deferredPrompt, toast]);
+
+  // ── Push Notification: subscribe ─────────────────────────────
+  const enableNotifications = useCallback(async () => {
+    if (notifLoading || !user) return;
+    if (typeof Notification === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
+      setNotifPermission('unsupported');
+      return;
+    }
+    setNotifLoading(true);
+    try {
+      const perm = await Notification.requestPermission();
+      setNotifPermission(perm as any);
+      if (perm !== 'granted') { setNotifLoading(false); return; }
+
+      const reg = await navigator.serviceWorker.ready;
+      const existing = await reg.pushManager.getSubscription();
+      const sub = existing || await reg.pushManager.subscribe({
+        userVisibleOnly: true,
+        applicationServerKey: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!,
+      });
+
+      const idToken = await (await import('firebase/auth')).getAuth().currentUser?.getIdToken();
+      await fetch('/api/attendance/notifications/subscribe', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+        },
+        body: JSON.stringify({
+          subscription: sub.toJSON(),
+          uid: user.uid,
+          employeeName: user.displayName || null,
+          employeeEmail: user.email || null,
+          brandId: user.brandId || null,
+          siteId: activeSite?.id || null,
+          platform: (navigator as any).standalone || window.matchMedia('(display-mode: standalone)').matches ? 'pwa' : 'browser',
+          userAgent: navigator.userAgent,
+        }),
+      });
+
+      setNotifSubscribed(true);
+      toast({ title: 'Notifikasi Aktif', description: 'Anda akan mendapat pengingat sebelum jam masuk dan pulang.' });
+    } catch (err: any) {
+      toast({ variant: 'destructive', title: 'Gagal mengaktifkan notifikasi', description: err.message || 'Coba lagi.' });
+    } finally {
+      setNotifLoading(false);
+    }
+  }, [notifLoading, user, activeSite, toast]);
+
+  const disableNotifications = useCallback(async () => {
+    if (!user) return;
+    setNotifLoading(true);
+    try {
+      const reg = await navigator.serviceWorker.ready;
+      const sub = await reg.pushManager.getSubscription();
+      if (sub) await sub.unsubscribe();
+
+      const idToken = await (await import('firebase/auth')).getAuth().currentUser?.getIdToken();
+      await fetch('/api/attendance/notifications/unsubscribe', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
+        },
+        body: JSON.stringify({ uid: user.uid }),
+      });
+
+      setNotifSubscribed(false);
+      toast({ title: 'Notifikasi Dinonaktifkan', description: 'Anda tidak akan menerima pengingat absen.' });
+    } catch (err: any) {
+      toast({ variant: 'destructive', title: 'Gagal menonaktifkan', description: err.message || 'Coba lagi.' });
+    } finally {
+      setNotifLoading(false);
+    }
+  }, [user, toast]);
+
+  // Buka modal bukti kondisi dari history (fetch doc by ID jika belum ada)
+  const openConditionReportById = useCallback(async (reportId: string) => {
+    if (fetchingConditionId) return;
+    setFetchingConditionId(reportId);
+    try {
+      const snap = await getDoc(doc(db, "attendance_condition_reports", reportId));
+      if (snap.exists()) {
+        const r = { id: snap.id, ...snap.data() };
+        const proofUrl = (r as any).conditionProofPhotoUrl || (r as any).proofPhotoUrl || null;
+        setConditionPhotoModal({ report: r, fileId: extractDriveFileId(proofUrl), directUrl: proofUrl });
+      } else {
+        toast({ variant: 'destructive', title: 'Laporan tidak ditemukan', description: 'Data kondisi tidak tersedia.' });
+      }
+    } catch {
+      toast({ variant: 'destructive', title: 'Gagal memuat', description: 'Coba lagi.' });
+    } finally {
+      setFetchingConditionId(null);
+    }
+  }, [db, fetchingConditionId, toast]);
+
+  // Ambil ulang lokasi dari verifyLocation step
+  const retakeLocation = useCallback(() => {
+    setTapStep("locating");
+    setTapGps(null);
+    setTapAddress(null);
+    navigator.geolocation.getCurrentPosition(
+      (pos) => proceedWithLocation({
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude,
+        accuracy: pos.coords.accuracy,
+        altitude: pos.coords.altitude,
+        heading: pos.coords.heading,
+        speed: pos.coords.speed,
+      }),
+      () => {
+        toast({ variant: "destructive", title: "GPS Error", description: "Gagal mengambil ulang lokasi. Pastikan GPS aktif." });
+        setTapStep("verifyLocation");
+      },
+      { enableHighAccuracy: true, timeout: 12000, maximumAge: 0 },
+    );
+  }, [proceedWithLocation, toast]);
+
   const cancelTap = useCallback(() => {
     setTapStep("idle");
     setTapGps(null);
@@ -897,12 +1177,6 @@ export default function AbsenPage() {
 
   const proceedToSelfie = useCallback(() => {
     setTapStep("selfie");
-  }, []);
-
-  // OUT tidak butuh foto — langsung ke preview
-  const proceedToPreview = useCallback(() => {
-    setTapPhoto(null);
-    setTapStep("preview");
   }, []);
 
   const handleSelfie = useCallback((base64: string) => {
@@ -918,14 +1192,121 @@ export default function AbsenPage() {
     setTapStep("selfie");
   }, []);
 
+  // ── Condition Report flow ──────────────────────────────────────
+  const startConditionReport = useCallback((type: 'check_in' | 'check_out') => {
+    setConditionType(type);
+    setConditionReason('');
+    setConditionNote('');
+    setConditionPhoto(null);
+    setConditionStep('form');
+  }, []);
+
+  const cancelConditionReport = useCallback(() => {
+    setConditionStep('idle');
+    setConditionReason('');
+    setConditionNote('');
+    setConditionPhoto(null);
+  }, []);
+
+  const handleConditionPhoto = useCallback((base64: string) => {
+    setConditionPhoto(base64);
+    setConditionStep('form');
+  }, []);
+
+  const submitConditionReport = useCallback(async () => {
+    if (!conditionReason || !conditionNote.trim() || !conditionPhoto || !user) return;
+    setConditionStep('submitting');
+    try {
+      const now = new Date();
+      const todayStr = format(now, "yyyy-MM-dd");
+      const gps = locationRef.current;
+
+      let proofPhotoUrl: string | null = null;
+      const ts = format(now, 'yyyyMMdd-HHmmss');
+      const idStr = user.employeeId || user.uid.slice(0, 8);
+      const fileName = `condition-report-${conditionType}-${idStr}-${ts}.jpg`;
+      const uploadRes = await fetch('/api/upload-attendance-photo', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          fileName,
+          mimeType: 'image/jpeg',
+          base64: conditionPhoto,
+          category: 'condition_report',
+          ownerUid: user.uid,
+          uploadedBy: user.uid,
+        }),
+      });
+      const uploadData = await uploadRes.json().catch(() => null);
+      if (uploadData?.success) {
+        proofPhotoUrl = uploadData.viewUrl || uploadData.downloadUrl || null;
+      }
+
+      // Gunakan liveAddress jika sudah ada (cached), else geocode sekarang
+      let reportAddr: AddressDetail | null = liveAddress;
+      if (!reportAddr && gps) {
+        try { reportAddr = await getDetailedAddress(gps.lat, gps.lng); } catch {}
+      }
+      const addressStr = reportAddr
+        ? [reportAddr.road, reportAddr.kecamatan, reportAddr.kabupatenKota, reportAddr.province].filter(Boolean).join(', ') || reportAddr.displayName
+        : null;
+
+      const report = cleanUndefined({
+        uid: user.uid,
+        employeeName: user.displayName || null,
+        employeeId: user.employeeId || null,
+        brandId: user.brandId || null,
+        brandName: user.brandName || null,
+        siteId: activeSite?.id || null,
+        siteName: activeSite?.name || null,
+        reportDate: todayStr,
+        reportType: conditionType,
+        reasonKey: conditionReason,
+        reasonLabel: conditionReason,
+        note: conditionNote.trim(),
+        conditionProofPhotoUrl: proofPhotoUrl,
+        proofPhotoUrl,
+        conditionProofType: 'reason_proof',
+        conditionProofTakenAt: proofPhotoUrl ? now.toISOString() : null,
+        reportLocationLat: gps?.lat ?? null,
+        reportLocationLng: gps?.lng ?? null,
+        reportGpsAccuracy: gps?.accuracy ?? null,
+        reportLocationAddress: addressStr,
+        address: addressStr,
+        status: 'pending_review',
+        linkedAttendanceId: null,
+        reviewedByUid: null,
+        reviewedAt: null,
+        reviewStatus: 'pending',
+        reviewNote: '',
+        reportedAt: now.toISOString(),
+      });
+
+      const docRef = await addDoc(collection(db, "attendance_condition_reports"), {
+        ...report,
+        createdAt: serverTimestamp(),
+        updatedAt: serverTimestamp(),
+      });
+
+      setTodayConditionReports(prev => [...prev, { id: docRef.id, ...report }]);
+      cancelConditionReport();
+      const typeLabel = conditionType === 'check_in' ? 'masuk' : 'pulang';
+      toast({ title: 'Laporan terkirim', description: `Kondisi ${typeLabel} telah dilaporkan ke HRD untuk direview.` });
+    } catch (err: any) {
+      toast({ variant: 'destructive', title: 'Gagal mengirim laporan', description: err.message || 'Coba lagi.' });
+      setConditionStep('form');
+    }
+  }, [conditionType, conditionReason, conditionNote, conditionPhoto, user, activeSite, db, toast, locationRef, cancelConditionReport, liveAddress]);
+
   // ── Final submit ───────────────────────────────────────────────
   const handleSubmit = useCallback(async () => {
-    // IN wajib foto, OUT tidak perlu
-    if (tapType === 'IN' && !tapPhoto) {
+    if (!tapPhoto) {
       toast({
         variant: "destructive",
         title: "Foto diperlukan",
-        description: "Foto wajah harus diambil untuk absen masuk.",
+        description: tapType === 'IN'
+          ? "Foto wajah harus diambil untuk absen masuk."
+          : "Foto pulang wajib diambil sebelum mengirim kehadiran pulang.",
       });
       return;
     }
@@ -936,7 +1317,9 @@ export default function AbsenPage() {
       const gps = tapGps;
       const addr = tapAddress;
       const flags = [...tapFlags];
-      const { status, lateMinutes } = calculateStatus(tapType, now, activeSite);
+      const { status, lateMinutes, scheduledCheckIn, allowedCheckInTime } = calculateStatus(tapType, now, activeSite);
+      const locationStatus = tapGps?.locationStatus ?? (tapGps?.insideRadius === false ? 'outside_radius' : 'inside_radius');
+      const needsHrdReview = locationStatus !== 'inside_radius';
 
       let driveFileId: string | null = null;
       let driveViewUrl: string | null = null;
@@ -944,8 +1327,7 @@ export default function AbsenPage() {
       let driveFolderId: string | null = null;
       let selfieUrl: string | null = null;
 
-      // Upload foto HANYA untuk absen masuk (IN)
-      if (tapType === 'IN' && tapPhoto) {
+      if (tapPhoto) {
         const watermarked = await applyWatermark(
           tapPhoto,
           tapType,
@@ -958,6 +1340,8 @@ export default function AbsenPage() {
             speed: null,
             distanceToSiteM: null,
             insideRadius: false,
+            locationStatus: 'unknown' as LocationStatus,
+            locationConfidence: 'low' as LocationConfidence,
             capturedAt: now,
           },
           addr,
@@ -966,7 +1350,8 @@ export default function AbsenPage() {
 
         const ts       = format(now, 'yyyyMMdd-HHmmss');
         const idStr    = user.employeeId || user.uid.slice(0, 8);
-        const fileName = `attendance-${idStr}-kehadiran_masuk-${ts}.jpg`;
+        const eventLabel = tapType === 'IN' ? 'kehadiran_masuk' : 'kehadiran_pulang';
+        const fileName = `attendance-${idStr}-${eventLabel}-${ts}.jpg`;
 
         const uploadRes = await fetch('/api/upload-attendance-photo', {
           method: 'POST',
@@ -1011,8 +1396,10 @@ export default function AbsenPage() {
             siteName: activeSite.name,
             siteAddress: activeSite.address || null,
             radiusM: activeSite.radiusM || 150,
-            lat: activeSite.office?.lat,
-            lng: activeSite.office?.lng,
+            lat: activeSite.lat ?? activeSite.office?.lat ?? null,
+            lng: activeSite.lng ?? activeSite.office?.lng ?? null,
+            shift: activeSite.shift || null,
+            timezone: activeSite.timezone || null,
           }
         : null;
 
@@ -1055,11 +1442,69 @@ export default function AbsenPage() {
         } : null,
         status,
         lateMinutes: lateMinutes ?? 0,
+        scheduledCheckIn: scheduledCheckIn || null,
+        allowedCheckInTime: allowedCheckInTime || null,
+        locationStatus,
+        // Status lokasi per tipe absen
+        ...(tapType === 'IN' ? {
+          checkInLocationStatus: locationStatus,
+          checkInDistanceFromSite: gps?.distanceToSiteM ?? null,
+          checkInNeedsReview: needsHrdReview,
+          checkInGpsAccuracy: gps?.accuracyM ?? null,
+          checkInLocationConfidence: gps?.locationConfidence ?? null,
+          checkInLocationAddress: addr?.displayName || null,
+          checkInLocationRoad: addr?.road || null,
+          checkInLocationDistrict: addr?.kecamatan || null,
+          checkInLocationCity: addr?.kabupatenKota || null,
+          needsHrdReview,
+        } : {
+          checkOutLocationStatus: locationStatus,
+          checkOutDistanceFromSite: gps?.distanceToSiteM ?? null,
+          checkOutNeedsReview: needsHrdReview,
+          checkOutGpsAccuracy: gps?.accuracyM ?? null,
+          checkOutLocationConfidence: gps?.locationConfidence ?? null,
+          checkOutLocationAddress: addr?.displayName || null,
+          checkOutLocationRoad: addr?.road || null,
+          checkOutLocationDistrict: addr?.kecamatan || null,
+          checkOutLocationCity: addr?.kabupatenKota || null,
+          needsHrdReview,
+        }),
+        // GPS teknis
+        gpsAccuracy: gps?.accuracyM ?? null,
+        locationConfidence: gps?.locationConfidence ?? null,
+        effectiveRadius: activeSite ? (activeSite.radiusM || 150) + (gps?.accuracyM ?? 0) : null,
+        // Link ke laporan kondisi sesuai tipe absen
+        ...(tapType === 'IN' ? {
+          checkInConditionReportId: todayConditionReports.find(r => r.reportType === 'check_in')?.id || null,
+        } : {
+          checkOutConditionReportId: todayConditionReports.find(r => r.reportType === 'check_out')?.id || null,
+        }),
+        linkedConditionReportIds: todayConditionReports.map(r => r.id),
+        hasConditionReport: todayConditionReports.length > 0,
+        // Fields sesuai spec untuk HRD review
+        locationLat: gps?.lat ?? null,
+        locationLng: gps?.lng ?? null,
+        siteLat: (activeSite?.lat ?? activeSite?.office?.lat) || null,
+        siteLng: (activeSite?.lng ?? activeSite?.office?.lng) || null,
+        distanceFromSite: gps?.distanceToSiteM ?? null,
+        radiusM: activeSite?.radiusM ?? null,
+        scheduledCheckOut: activeSite?.shift?.endTime ?? null,
+        lateToleranceMinutes: activeSite?.shift?.graceLateMinutes ?? null,
+        timezone: activeSite?.timezone ?? 'Asia/Jakarta',
         flags: flags || [],
         siteId: activeSite?.id || "OFFSITE",
         siteName: activeSite?.name || "Luar Kantor",
         siteSnapshot,
         photoUrl: selfieUrl,
+        ...(tapType === 'IN' ? {
+          checkInSelfieUrl: selfieUrl,
+          checkInPhotoUrl: selfieUrl,
+          checkInPhotoTakenAt: selfieUrl ? now.toISOString() : null,
+        } : {
+          checkOutSelfieUrl: selfieUrl,
+          checkOutPhotoUrl: selfieUrl,
+          checkOutPhotoTakenAt: selfieUrl ? now.toISOString() : null,
+        }),
         evidence: {
           selfieUrl: driveViewUrl || null,
           watermarkedSelfieUrl: driveViewUrl || null,
@@ -1112,7 +1557,43 @@ export default function AbsenPage() {
     applyWatermark,
     db,
     toast,
+    todayConditionReports,
   ]);
+
+  // ─── Realtime jarak ke kantor (live, update setiap gps watch) ──
+  const liveDistanceToSite = useMemo(() => {
+    if (!liveLocation || !activeSite) return null;
+    const siteLat = activeSite.lat ?? activeSite.office?.lat;
+    const siteLng = activeSite.lng ?? activeSite.office?.lng;
+    if (siteLat == null || siteLng == null) return null;
+    return getDistance(liveLocation.lat, liveLocation.lng, siteLat, siteLng);
+  }, [liveLocation, activeSite]);
+
+  const liveLocationEval = useMemo(() => {
+    if (liveDistanceToSite == null || !activeSite || !liveLocation) return null;
+    return evaluateLocation(liveDistanceToSite, activeSite.radiusM || 150, liveLocation.accuracy);
+  }, [liveDistanceToSite, activeSite, liveLocation]);
+
+  const liveInsideRadius = useMemo(() => {
+    if (!liveLocationEval) return null;
+    return liveLocationEval.locationStatus === 'inside_radius';
+  }, [liveLocationEval]);
+
+  // ─── Shift info dari activeSite ────────────────────────────────
+  const shiftInfo = useMemo(() => {
+    if (!activeSite?.shift) return null;
+    const startTime        = activeSite.shift.startTime        ?? '—';
+    const endTime          = activeSite.shift.endTime          ?? '—';
+    const graceLateMinutes = activeSite.shift.graceLateMinutes ?? 0;
+    const radiusM          = activeSite.radiusM                ?? 150;
+    let allowedCheckInTime = '—';
+    if (startTime !== '—') {
+      const [h, m] = startTime.split(':').map(Number);
+      const grace = new Date(0); grace.setHours(h, m + graceLateMinutes, 0, 0);
+      allowedCheckInTime = `${String(grace.getHours()).padStart(2,'0')}:${String(grace.getMinutes()).padStart(2,'0')}`;
+    }
+    return { startTime, endTime, graceLateMinutes, radiusM, allowedCheckInTime };
+  }, [activeSite]);
 
   // ─── Loading guard ─────────────────────────────────────────────
   if (userLoading || (loadingSites && isAttendanceAllowed)) {
@@ -1171,25 +1652,33 @@ export default function AbsenPage() {
             <Badge className="text-[9px] font-bold bg-primary/10 text-primary border-primary/20 border py-1 px-2 rounded-full">
               Web Absen
             </Badge>
-            {showCancel ? (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={cancelTap}
-                className="rounded-full w-9 h-9 text-muted-foreground"
-              >
-                <X className="w-4 h-4" />
-              </Button>
-            ) : (
-              <Button
-                variant="ghost"
-                size="icon"
-                onClick={() => signOut(auth)}
-                className="rounded-full w-9 h-9"
-              >
-                <LogOut className="w-4 h-4" />
-              </Button>
-            )}
+            <div className="flex items-center gap-1.5">
+              {/* Tombol Unduh Aplikasi — selalu muncul di header, kecuali saat flow aktif */}
+              {!showCancel && !isInstalled && (
+                <button
+                  onClick={handleInstallApp}
+                  className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[9px] font-bold border active:opacity-75 ${
+                    canInstallApp
+                      ? 'bg-primary text-white border-primary'
+                      : 'bg-teal-100 text-teal-800 border-teal-200'
+                  }`}
+                >
+                  📲 {canInstallApp ? 'Install Aplikasi' : 'Unduh Aplikasi'}
+                </button>
+              )}
+              {!showCancel && isInstalled && (
+                <span className="text-[9px] text-green-700 font-bold px-2">✓ App terpasang</span>
+              )}
+              {showCancel ? (
+                <Button variant="ghost" size="icon" onClick={cancelTap} className="rounded-full w-9 h-9 text-muted-foreground">
+                  <X className="w-4 h-4" />
+                </Button>
+              ) : (
+                <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="rounded-full w-9 h-9">
+                  <LogOut className="w-4 h-4" />
+                </Button>
+              )}
+            </div>
           </div>
         </div>
       </div>
@@ -1232,7 +1721,7 @@ export default function AbsenPage() {
       <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto shadow-2xl border-x">
         {renderHeader(true)}
         <div className="flex-1 overflow-auto pb-6">
-          <StepPills current={0} isOut={tapType === "OUT"} />
+          <StepPills current={0} />
 
           <div className="p-4 space-y-4">
             {/* Event & Time */}
@@ -1255,73 +1744,46 @@ export default function AbsenPage() {
             </div>
 
             {/* Lokasi terdeteksi */}
-            <div className="bg-white rounded-2xl border shadow-sm p-4 space-y-3">
+            <div className={`rounded-2xl border shadow-sm p-4 space-y-2 ${tapGps?.locationStatus === 'inside_radius' ? 'bg-emerald-50 border-emerald-200' : 'bg-white'}`}>
               <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest">
-                Lokasi terdeteksi
+                Lokasi Terdeteksi
               </p>
               {tapAddress ? (
-                <div className="space-y-1.5 text-[9px] text-muted-foreground">
-                  {tapAddress.road && (
-                    <p>
-                      <span className="font-bold">Jalan:</span>{" "}
-                      {tapAddress.road}
-                    </p>
-                  )}
-                  {tapAddress.kelurahan && (
-                    <p>
-                      <span className="font-bold">Kelurahan/Desa:</span>{" "}
-                      {tapAddress.kelurahan}
-                    </p>
-                  )}
-                  {tapAddress.kecamatan && (
-                    <p>
-                      <span className="font-bold">Kecamatan:</span>{" "}
-                      {tapAddress.kecamatan}
-                    </p>
-                  )}
-                  {tapAddress.kabupatenKota && (
-                    <p>
-                      <span className="font-bold">Kabupaten/Kota:</span>{" "}
-                      {tapAddress.kabupatenKota}
-                    </p>
-                  )}
-                  {tapAddress.province && (
-                    <p>
-                      <span className="font-bold">Provinsi:</span>{" "}
-                      {tapAddress.province}
-                    </p>
-                  )}
-                  {tapAddress.postcode && (
-                    <p>
-                      <span className="font-bold">Kode Pos:</span>{" "}
-                      {tapAddress.postcode}
-                    </p>
-                  )}
-                </div>
-              ) : (
-                <p className="text-[9px] text-muted-foreground italic">
-                  Memuat lokasi...
+                <p className="text-[13px] font-semibold text-foreground leading-snug">
+                  {[tapAddress.road, tapAddress.kecamatan, tapAddress.kabupatenKota, tapAddress.province]
+                    .filter(Boolean).join(', ') || tapAddress.displayName}
                 </p>
+              ) : tapGps ? (
+                <p className="text-[11px] text-muted-foreground italic flex items-center gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Memuat alamat…
+                </p>
+              ) : (
+                <p className="text-[11px] text-muted-foreground italic">Alamat belum terbaca. Lokasi tetap tersimpan untuk review HRD.</p>
+              )}
+              {/* Status sederhana */}
+              {tapGps && (
+                <p className={`text-[11px] font-bold ${tapGps.locationStatus === 'inside_radius' ? 'text-emerald-700' : 'text-amber-700'}`}>
+                  {tapGps.locationStatus === 'inside_radius'
+                    ? '✓ Lokasi terbaca'
+                    : 'Lokasi akan ditinjau HRD jika diperlukan.'}
+                </p>
+              )}
+              {/* Tombol ambil ulang jika GPS kurang presisi */}
+              {tapGps && (tapGps.locationStatus === 'gps_uncertain' || tapGps.locationStatus === 'gps_low_accuracy') && (
+                <Button variant="outline" onClick={retakeLocation} className="w-full h-9 rounded-xl text-[11px] font-bold gap-1.5 mt-1">
+                  <Navigation className="w-3.5 h-3.5" /> Ambil Ulang Lokasi
+                </Button>
               )}
             </div>
           </div>
 
           <div className="px-4 space-y-2">
-            {tapType === "IN" ? (
-              <Button
-                onClick={proceedToSelfie}
-                className="w-full h-12 rounded-2xl font-bold gap-2"
-              >
-                <Camera className="w-4 h-4" /> Lanjut Ambil Foto
-              </Button>
-            ) : (
-              <Button
-                onClick={proceedToPreview}
-                className="w-full h-12 rounded-2xl font-bold gap-2 bg-secondary hover:bg-secondary/90"
-              >
-                <CheckCircle2 className="w-4 h-4" /> Konfirmasi Pulang
-              </Button>
-            )}
+            <Button
+              onClick={proceedToSelfie}
+              className={`w-full h-12 rounded-2xl font-bold gap-2${tapType === "OUT" ? " bg-secondary hover:bg-secondary/90" : ""}`}
+            >
+              <Camera className="w-4 h-4" /> Lanjut Ambil Foto
+            </Button>
             <Button
               variant="ghost"
               onClick={cancelTap}
@@ -1335,9 +1797,175 @@ export default function AbsenPage() {
     );
   }
 
-  // ─── Step: Selfie (hanya untuk IN) ─────────────────────────────
+  // ─── Condition Report: Camera (kamera belakang) ───────────────
+  if (conditionStep === 'camera') {
+    return <CameraCapture onCapture={handleConditionPhoto} onCancel={() => setConditionStep('form')} facingMode="environment" mode="proof" />;
+  }
+
+  // ─── Condition Report: Form / Submitting ───────────────────────
+  if (conditionStep === 'form' || conditionStep === 'submitting') {
+    const isCheckIn = conditionType === 'check_in';
+    const conditionReasonOptions = isCheckIn ? [
+      'Ban bocor',
+      'Kendala kendaraan',
+      'Macet ekstrem',
+      'Kendala kesehatan ringan',
+      'Tugas luar sebelum ke kantor',
+      'Diminta langsung ke lokasi klien/DLH',
+      'Lainnya',
+    ] : [
+      'Tugas luar setelah dari kantor',
+      'Langsung pulang dari lokasi klien/DLH',
+      'Meeting luar kantor',
+      'Perjalanan dinas lokal',
+      'Kegiatan lapangan',
+      'Kondisi khusus disetujui atasan',
+      'Lainnya',
+    ];
+    const formTitle = isCheckIn ? 'Lapor Kondisi Masuk' : 'Lapor Kondisi Pulang';
+    const formSubtitle = isCheckIn
+      ? 'Laporan ini sebagai bukti kondisi sebelum masuk. HRD akan melakukan review.'
+      : 'Gunakan ini jika Anda absen pulang dari lokasi tugas luar, klien, DLH, lapangan, atau kondisi khusus lainnya.';
+    const canSubmit = !!conditionReason && conditionNote.trim().length > 0 && !!conditionPhoto && conditionStep !== 'submitting';
+    return (
+      <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto shadow-2xl border-x">
+        {renderHeader(true)}
+        <div className="flex-1 overflow-auto pb-8">
+          <div className="px-4 pt-4 pb-2">
+            <div className="flex items-center gap-2 mb-1">
+              <ShieldAlert className="w-4 h-4 text-amber-600" />
+              <p className="font-black text-sm">{formTitle}</p>
+            </div>
+            <p className="text-[11px] text-muted-foreground leading-snug">
+              {formSubtitle}
+            </p>
+          </div>
+
+          <div className="p-4 space-y-4">
+            {/* Reason picker */}
+            <div className="bg-white rounded-2xl border shadow-sm p-4 space-y-2">
+              <p className="text-[9px] font-black text-muted-foreground uppercase tracking-widest">
+                Jenis Kondisi <span className="text-red-500">*</span>
+              </p>
+              <div className="space-y-1.5">
+                {conditionReasonOptions.map(opt => (
+                  <button
+                    key={opt}
+                    onClick={() => setConditionReason(opt)}
+                    className={`w-full text-left px-4 py-2.5 rounded-xl border text-sm font-semibold transition-colors ${
+                      conditionReason === opt
+                        ? 'bg-amber-600 text-white border-amber-600'
+                        : 'bg-white text-slate-700 border-slate-200 active:bg-slate-50'
+                    }`}
+                  >
+                    {conditionReason === opt ? '✓ ' : ''}{opt}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Note */}
+            <div className="bg-white rounded-2xl border shadow-sm p-4 space-y-2">
+              <p className="text-[9px] font-black text-muted-foreground uppercase tracking-widest">
+                Catatan Singkat <span className="text-red-500">*</span>
+              </p>
+              <textarea
+                value={conditionNote}
+                onChange={e => setConditionNote(e.target.value)}
+                placeholder="Jelaskan kondisi secara singkat, misal: ban bocor di Jl. Sudirman, sedang diperbaiki..."
+                rows={4}
+                className="w-full rounded-xl border border-slate-200 px-3 py-2 text-sm bg-white resize-none focus:outline-none focus:ring-2 focus:ring-amber-500"
+              />
+            </div>
+
+            {/* Foto bukti */}
+            <div className="bg-white rounded-2xl border shadow-sm p-4 space-y-2">
+              <p className="text-[9px] font-black text-muted-foreground uppercase tracking-widest">
+                Foto Bukti Kondisi <span className="text-red-500">*</span>
+              </p>
+              {conditionPhoto ? (
+                <div className="space-y-2">
+                  <div className="w-full rounded-xl overflow-hidden border bg-black">
+                    <img src={conditionPhoto} alt="Bukti kondisi" className="w-full h-[40vw] max-h-[240px] object-cover bg-black" />
+                  </div>
+                  <button
+                    onClick={() => setConditionStep('camera')}
+                    className="text-[11px] font-bold text-amber-700 underline underline-offset-2"
+                  >
+                    Ulangi foto
+                  </button>
+                </div>
+              ) : (
+                <button
+                  onClick={() => setConditionStep('camera')}
+                  className="w-full h-24 rounded-xl border-2 border-dashed border-slate-300 flex flex-col items-center justify-center gap-2 text-slate-500 active:bg-slate-50"
+                >
+                  <Camera className="w-6 h-6" />
+                  <span className="text-[11px] font-bold">Ambil Foto Bukti</span>
+                </button>
+              )}
+              <p className="text-[9px] text-muted-foreground">Gunakan kamera belakang. Foto kondisi kendaraan, lokasi tugas, atau situasi lapangan.</p>
+            </div>
+
+            {/* Lokasi GPS */}
+            <div className="bg-muted/10 rounded-2xl border p-3 space-y-1">
+              <div className="flex items-center gap-1.5">
+                <MapPin className="w-3.5 h-3.5 text-muted-foreground shrink-0" />
+                <p className="text-[9px] font-black text-muted-foreground uppercase">Lokasi Saat Laporan</p>
+              </div>
+              {liveLocation ? (
+                <>
+                  {liveAddress ? (
+                    <p className="text-[11px] font-semibold text-foreground leading-snug">
+                      {[liveAddress.road, liveAddress.kelurahan, liveAddress.kecamatan, liveAddress.kabupatenKota, liveAddress.province]
+                        .filter(Boolean).join(', ') || liveAddress.displayName}
+                    </p>
+                  ) : (
+                    <p className="text-[10px] text-muted-foreground italic">Memuat alamat… Lokasi tetap tersimpan untuk review HRD.</p>
+                  )}
+                  <p className="text-[9px] text-muted-foreground">Akurasi GPS: ±{Math.round(liveLocation.accuracy)} m</p>
+                </>
+              ) : (
+                <p className="text-[10px] text-muted-foreground flex items-center gap-1">
+                  <Loader2 className="w-3 h-3 animate-spin" /> Mendeteksi lokasi…
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+
+        <div className="px-4 pb-6 pt-2 space-y-2 border-t bg-background">
+          {conditionStep === 'submitting' && (
+            <div className="flex items-center justify-center gap-2 py-2">
+              <Loader2 className="w-4 h-4 animate-spin text-amber-600" />
+              <p className="text-sm font-bold text-amber-700">Mengirim laporan…</p>
+            </div>
+          )}
+          <Button
+            onClick={submitConditionReport}
+            disabled={!canSubmit}
+            className="w-full h-12 rounded-2xl font-bold gap-2 bg-amber-600 hover:bg-amber-500 text-white"
+          >
+            <CheckCircle2 className="w-4 h-4" /> {conditionType === 'check_in' ? 'Kirim Laporan Kondisi Masuk' : 'Kirim Laporan Kondisi Pulang'}
+          </Button>
+          {!conditionReason && <p className="text-[9px] text-muted-foreground text-center">Pilih jenis kondisi</p>}
+          {conditionReason && !conditionNote.trim() && <p className="text-[9px] text-muted-foreground text-center">Isi catatan singkat</p>}
+          {conditionReason && conditionNote.trim() && !conditionPhoto && <p className="text-[9px] text-muted-foreground text-center">Ambil foto bukti</p>}
+          <Button
+            variant="ghost"
+            onClick={cancelConditionReport}
+            className="w-full rounded-2xl text-xs text-muted-foreground"
+          >
+            Batal
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  // ─── Step: Selfie (kamera depan) ──────────────────────────────
   if (tapStep === "selfie") {
-    return <CameraCapture onCapture={handleSelfie} onCancel={cancelTap} />;
+    return <CameraCapture onCapture={handleSelfie} onCancel={cancelTap} facingMode="user" mode="selfie" />;
   }
 
   // ─── Step: Preview ─────────────────────────────────────────────
@@ -1346,10 +1974,9 @@ export default function AbsenPage() {
       <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto shadow-2xl border-x">
         {renderHeader(true)}
         <div className="flex-1 overflow-auto pb-6">
-          <StepPills current={tapType === "OUT" ? 1 : 2} isOut={tapType === "OUT"} />
+          <StepPills current={2} />
 
-          {/* Foto hanya ditampilkan untuk IN */}
-          {tapType === "IN" && tapPhoto && (
+          {tapPhoto && (
             <div className="px-4">
               <div className="w-full rounded-2xl border shadow-sm overflow-hidden bg-black">
                 <img
@@ -1439,26 +2066,72 @@ export default function AbsenPage() {
                   <Loader2 className="w-3 h-3 animate-spin" /> Memuat alamat...
                 </p>
               )}
+              {/* Radius status di preview */}
+              {tapGps && (
+                <div className={`mt-2 rounded-xl px-3 py-2 text-[10px] font-semibold ${tapGps.insideRadius ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>
+                  {tapGps.insideRadius
+                    ? `✓ Dalam radius (${Math.round(tapGps.distanceToSiteM ?? 0)} m dari kantor)`
+                    : `⚠ Di luar radius — ${Math.round(tapGps.distanceToSiteM ?? 0)} m dari kantor (radius ${activeSite?.radiusM ?? 150} m) · Akan ditinjau HRD`}
+                </div>
+              )}
             </div>
+
+            {/* Info status di preview */}
+            {(() => {
+              const { status, lateMinutes: lm, allowedCheckInTime: aci } = calculateStatus(tapType, tapTime, activeSite);
+              const isLate    = tapType === 'IN'  && status === 'LATE';
+              const isEarly   = tapType === 'OUT' && status === 'EARLY_LEAVE';
+              const isOutside = tapGps?.insideRadius === false;
+              if (!isLate && !isEarly && !isOutside) return null;
+              return (
+                <div className="rounded-2xl border shadow-sm overflow-hidden bg-amber-50 border-amber-200">
+                  <div className="px-4 py-3 space-y-1.5">
+                    {isLate && (
+                      <div className="flex items-center gap-2 text-red-700">
+                        <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                        <p className="text-[11px] font-black">Terlambat {lm} menit · batas {aci} WIB</p>
+                      </div>
+                    )}
+                    {isOutside && (
+                      <div className="flex items-center gap-2 text-amber-700">
+                        <MapPin className="w-3.5 h-3.5 shrink-0" />
+                        <p className="text-[11px] font-black">
+                          Di luar radius · {Math.round(tapGps?.distanceToSiteM ?? 0)} m dari kantor
+                        </p>
+                      </div>
+                    )}
+                    {(isLate || isOutside) && todayConditionReports.length > 0 && (
+                      <p className="text-[10px] text-teal-700 font-semibold">
+                        ✓ Laporan kondisi hari ini tersedia — akan ditautkan ke absen ini.
+                      </p>
+                    )}
+                    {(isLate || isOutside) && todayConditionReports.length === 0 && (
+                      <p className="text-[10px] text-muted-foreground">
+                        Belum ada laporan kondisi hari ini. Anda bisa melapor kondisi dari halaman utama.
+                      </p>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           <div className="px-4 space-y-2">
             <Button
               onClick={handleSubmit}
+              disabled={false}
               className={`w-full h-12 rounded-2xl font-bold gap-2 ${tapType === "OUT" ? "bg-secondary hover:bg-secondary/90" : ""}`}
             >
               <CheckCircle2 className="w-4 h-4" />
               {tapType === "IN" ? "Kirim Kehadiran Masuk" : "Kirim Kehadiran Pulang"}
             </Button>
-            {tapType === "IN" && (
-              <Button
-                variant="outline"
-                onClick={retakeSelfie}
-                className="w-full h-11 rounded-2xl gap-2"
-              >
-                <Camera className="w-4 h-4" /> Ulangi Selfie
-              </Button>
-            )}
+            <Button
+              variant="outline"
+              onClick={retakeSelfie}
+              className="w-full h-11 rounded-2xl gap-2"
+            >
+              <Camera className="w-4 h-4" /> Ulangi Foto
+            </Button>
             <Button
               variant="ghost"
               onClick={cancelTap}
@@ -1494,7 +2167,7 @@ export default function AbsenPage() {
 
   // ─── Step: Success ─────────────────────────────────────────────
   if (tapStep === "success") {
-    const { status, lateMinutes } = calculateStatus(
+    const { status, lateMinutes, allowedCheckInTime } = calculateStatus(
       tapType,
       tapTime,
       activeSite,
@@ -1547,6 +2220,12 @@ export default function AbsenPage() {
                       : "TEPAT WAKTU"}
                 </Badge>
               </div>
+              {status === "LATE" && allowedCheckInTime && (
+                <div className="flex justify-between text-[9px] text-red-600">
+                  <span>Batas toleransi</span>
+                  <span className="font-black tabular-nums">{allowedCheckInTime} WIB</span>
+                </div>
+              )}
               {/* Zona badge hidden per simplified UI */}
               {sa && (
                 <p className="text-[8px] text-muted-foreground pt-1 border-t">
@@ -1711,6 +2390,347 @@ export default function AbsenPage() {
               </div>
             </div>
 
+            {/* ── Aturan Hari Ini (dari attendance_sites) ────────── */}
+            {isAttendanceAllowed && shiftInfo && (
+              <div className="bg-white rounded-2xl border shadow-sm p-4">
+                <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest mb-3 flex items-center gap-1.5">
+                  <Clock className="w-3 h-3" /> Aturan Hari Ini
+                </p>
+                <div className="grid grid-cols-2 gap-x-4 gap-y-2 text-[11px]">
+                  <div>
+                    <p className="text-muted-foreground text-[9px]">Jam Masuk</p>
+                    <p className="font-black tabular-nums">{shiftInfo.startTime} WIB</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground text-[9px]">Batas Telat</p>
+                    <p className="font-black tabular-nums text-amber-700">{shiftInfo.allowedCheckInTime} WIB</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground text-[9px]">Jam Pulang</p>
+                    <p className="font-black tabular-nums">{shiftInfo.endTime} WIB</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground text-[9px]">Radius Kantor</p>
+                    <p className="font-black tabular-nums">{shiftInfo.radiusM} m</p>
+                  </div>
+                </div>
+                {shiftInfo.graceLateMinutes > 0 && (
+                  <p className="text-[9px] text-muted-foreground mt-2 border-t pt-2">
+                    Toleransi keterlambatan: <span className="font-bold">{shiftInfo.graceLateMinutes} menit</span>
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* ── Status Lokasi Realtime ──────────────────────────── */}
+            {isAttendanceAllowed && (
+              <div className={`rounded-2xl border shadow-sm p-4 ${
+                liveLocationEval?.locationStatus === 'inside_radius' ? 'bg-emerald-50 border-emerald-200' : 'bg-white'
+              }`}>
+                <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                  <MapPin className="w-3 h-3" /> Lokasi Anda Sekarang
+                </p>
+                {liveLocation ? (
+                  <div className="space-y-1.5">
+                    {/* Alamat */}
+                    {liveAddress ? (
+                      <p className="text-[12px] font-semibold text-foreground leading-snug">
+                        {[liveAddress.road, liveAddress.kecamatan, liveAddress.kabupatenKota, liveAddress.province]
+                          .filter(Boolean).join(', ') || liveAddress.displayName}
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground italic flex items-center gap-1">
+                        <Loader2 className="w-3 h-3 animate-spin" /> Memuat alamat…
+                      </p>
+                    )}
+                    {/* Status sederhana */}
+                    {liveLocationEval ? (
+                      <p className={`text-[11px] font-bold ${liveLocationEval.locationStatus === 'inside_radius' ? 'text-emerald-700' : 'text-muted-foreground'}`}>
+                        {liveLocationEval.locationStatus === 'inside_radius'
+                          ? '✓ Lokasi terbaca'
+                          : 'Lokasi akan ditinjau HRD jika diperlukan.'}
+                      </p>
+                    ) : (
+                      <p className="text-[11px] text-muted-foreground">Mendeteksi kantor terdekat…</p>
+                    )}
+                  </div>
+                ) : (
+                  <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
+                    <Loader2 className="w-3 h-3 animate-spin" /> Mendeteksi lokasi…
+                  </p>
+                )}
+              </div>
+            )}
+
+            {/* ── Card: Kondisi Khusus Hari Ini ─────────────────── */}
+            {isAttendanceAllowed && (() => {
+              const checkInReports = todayConditionReports.filter(r => r.reportType === 'check_in' || !r.reportType);
+              const checkOutReports = todayConditionReports.filter(r => r.reportType === 'check_out');
+
+              // Compact chip — 1 baris, klik untuk buka detail modal
+              const renderCompactChip = (r: any, label: string) => {
+                const proofUrl = r.conditionProofPhotoUrl || r.proofPhotoUrl || null;
+                const proofFileId = extractDriveFileId(proofUrl);
+                const reviewBadge = r.reviewStatus === 'accepted'
+                  ? { cls: 'bg-green-100 text-green-700', txt: 'Diterima' }
+                  : r.reviewStatus === 'rejected'
+                  ? { cls: 'bg-red-100 text-red-700', txt: 'Ditolak' }
+                  : { cls: 'bg-yellow-100 text-yellow-800', txt: 'Menunggu Review' };
+                return (
+                  <div key={r.id} className="flex items-center justify-between gap-2 bg-slate-50 rounded-xl border px-3 py-2">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <ShieldAlert className="w-3 h-3 text-amber-500 shrink-0" />
+                      <span className="text-[10px] font-bold text-slate-700 truncate">{label}: {r.reasonLabel}</span>
+                      <Badge className={`text-[7px] border-none shrink-0 ${reviewBadge.cls}`}>{reviewBadge.txt}</Badge>
+                    </div>
+                    <button
+                      onClick={() => setConditionPhotoModal({ report: r, fileId: proofFileId, directUrl: proofUrl })}
+                      className="text-[9px] text-teal-700 font-bold underline underline-offset-2 shrink-0 hover:text-teal-600"
+                    >
+                      Lihat Detail
+                    </button>
+                  </div>
+                );
+              };
+
+              // Phase: belum_check_in | checked_in | checked_out
+              const phase = !todayStatus.hasIn ? 'belum_check_in' : !todayStatus.hasOut ? 'checked_in' : 'checked_out';
+
+              return (
+                <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+                  <div className="px-4 py-2.5 border-b bg-amber-50/60 flex items-center justify-between">
+                    <div className="flex items-center gap-1.5">
+                      <ShieldAlert className="w-3.5 h-3.5 text-amber-600" />
+                      <p className="text-[8px] font-black text-amber-800 uppercase tracking-widest">Kondisi Khusus Hari Ini</p>
+                    </div>
+                    {loadingConditionReports && <Loader2 className="w-3 h-3 animate-spin text-muted-foreground" />}
+                  </div>
+
+                  <div className="p-4 space-y-3">
+                    {/* ── Phase: belum_check_in — fokus Kondisi Masuk ── */}
+                    {phase === 'belum_check_in' && (
+                      <>
+                        <p className="text-[10px] text-muted-foreground leading-snug">
+                          Laporkan jika ada kendala sebelum sampai kantor atau sebelum absen masuk.
+                        </p>
+                        {checkInReports.length > 0 ? (
+                          <div className="space-y-1.5">
+                            {checkInReports.map(r => {
+                              const proofUrl = r.conditionProofPhotoUrl || r.proofPhotoUrl || null;
+                              const proofFileId = extractDriveFileId(proofUrl);
+                              const reviewBadge = r.reviewStatus === 'accepted'
+                                ? { cls: 'bg-green-100 text-green-700', txt: 'Diterima HRD' }
+                                : r.reviewStatus === 'rejected'
+                                ? { cls: 'bg-red-100 text-red-700', txt: 'Ditolak HRD' }
+                                : { cls: 'bg-yellow-100 text-yellow-800', txt: 'Menunggu Review' };
+                              return (
+                                <div key={r.id} className="bg-amber-50 rounded-xl border border-amber-200 p-3 space-y-1.5">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <p className="text-[11px] font-black text-amber-800">{r.reasonLabel}</p>
+                                    <Badge className={`text-[7px] border-none shrink-0 ${reviewBadge.cls}`}>{reviewBadge.txt}</Badge>
+                                  </div>
+                                  {r.note && <p className="text-[10px] text-slate-700">{r.note}</p>}
+                                  {r.reportedAt && (
+                                    <p className="text-[9px] text-muted-foreground">
+                                      Dilaporkan: {format(new Date(r.reportedAt), "HH:mm", { locale: localeId })} WIB
+                                    </p>
+                                  )}
+                                  {proofUrl && (
+                                    <button
+                                      onClick={() => setConditionPhotoModal({ report: r, fileId: proofFileId, directUrl: proofUrl })}
+                                      className="flex items-center gap-1 text-[9px] text-teal-700 font-bold underline underline-offset-2 hover:text-teal-600"
+                                    >
+                                      <Camera className="w-2.5 h-2.5 shrink-0" /> Lihat Foto Bukti
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                        <Button
+                          variant="outline"
+                          onClick={() => startConditionReport('check_in')}
+                          className="w-full h-10 rounded-xl text-[11px] font-black gap-1.5 border-amber-300 text-amber-700 hover:bg-amber-50"
+                        >
+                          <ShieldAlert className="w-3.5 h-3.5" /> Lapor Kondisi Masuk
+                        </Button>
+                      </>
+                    )}
+
+                    {/* ── Phase: checked_in — fokus Kondisi Pulang ── */}
+                    {phase === 'checked_in' && (
+                      <>
+                        {/* Kondisi Masuk ringkasan jika ada */}
+                        {checkInReports.length > 0 && (
+                          <div className="space-y-1">
+                            <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest">Kondisi Masuk Tersimpan</p>
+                            <div className="space-y-1">{checkInReports.map(r => renderCompactChip(r, 'Masuk'))}</div>
+                          </div>
+                        )}
+
+                        <p className="text-[10px] text-muted-foreground leading-snug">
+                          Laporkan jika ada kondisi khusus saat absen pulang, misalnya pulang dari lokasi tugas luar.
+                        </p>
+                        {checkOutReports.length > 0 ? (
+                          <div className="space-y-1.5">
+                            {checkOutReports.map(r => {
+                              const proofUrl = r.conditionProofPhotoUrl || r.proofPhotoUrl || null;
+                              const proofFileId = extractDriveFileId(proofUrl);
+                              const reviewBadge = r.reviewStatus === 'accepted'
+                                ? { cls: 'bg-green-100 text-green-700', txt: 'Diterima HRD' }
+                                : r.reviewStatus === 'rejected'
+                                ? { cls: 'bg-red-100 text-red-700', txt: 'Ditolak HRD' }
+                                : { cls: 'bg-yellow-100 text-yellow-800', txt: 'Menunggu Review' };
+                              return (
+                                <div key={r.id} className="bg-blue-50 rounded-xl border border-blue-200 p-3 space-y-1.5">
+                                  <div className="flex items-start justify-between gap-2">
+                                    <p className="text-[11px] font-black text-blue-800">{r.reasonLabel}</p>
+                                    <Badge className={`text-[7px] border-none shrink-0 ${reviewBadge.cls}`}>{reviewBadge.txt}</Badge>
+                                  </div>
+                                  {r.note && <p className="text-[10px] text-slate-700">{r.note}</p>}
+                                  {r.reportedAt && (
+                                    <p className="text-[9px] text-muted-foreground">
+                                      Dilaporkan: {format(new Date(r.reportedAt), "HH:mm", { locale: localeId })} WIB
+                                    </p>
+                                  )}
+                                  {proofUrl && (
+                                    <button
+                                      onClick={() => setConditionPhotoModal({ report: r, fileId: proofFileId, directUrl: proofUrl })}
+                                      className="flex items-center gap-1 text-[9px] text-teal-700 font-bold underline underline-offset-2 hover:text-teal-600"
+                                    >
+                                      <Camera className="w-2.5 h-2.5 shrink-0" /> Lihat Foto Bukti
+                                    </button>
+                                  )}
+                                </div>
+                              );
+                            })}
+                          </div>
+                        ) : null}
+                        <Button
+                          variant="outline"
+                          onClick={() => startConditionReport('check_out')}
+                          className="w-full h-10 rounded-xl text-[11px] font-black gap-1.5 border-blue-300 text-blue-700 hover:bg-blue-50"
+                        >
+                          <ShieldAlert className="w-3.5 h-3.5" /> Lapor Kondisi Pulang
+                        </Button>
+                      </>
+                    )}
+
+                    {/* ── Phase: checked_out — ringkasan saja ── */}
+                    {phase === 'checked_out' && (
+                      <>
+                        {checkInReports.length === 0 && checkOutReports.length === 0 ? (
+                          <p className="text-[10px] text-muted-foreground italic text-center py-1">Tidak ada laporan kondisi hari ini.</p>
+                        ) : (
+                          <div className="space-y-1.5">
+                            {checkInReports.length > 0 && (
+                              <div className="space-y-1">
+                                <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest">Kondisi Masuk</p>
+                                <div className="space-y-1">{checkInReports.map(r => renderCompactChip(r, 'Masuk'))}</div>
+                              </div>
+                            )}
+                            {checkOutReports.length > 0 && (
+                              <div className="space-y-1">
+                                <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest mt-1">Kondisi Pulang</p>
+                                <div className="space-y-1">{checkOutReports.map(r => renderCompactChip(r, 'Pulang'))}</div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
+            {/* ── Card: Notifikasi Absen ────────────────────────── */}
+            {isAttendanceAllowed && (() => {
+              const isIOS = /iphone|ipad|ipod/i.test(typeof navigator !== 'undefined' ? navigator.userAgent : '');
+              const isStandalone = typeof window !== 'undefined' && (
+                window.matchMedia('(display-mode: standalone)').matches || (navigator as any).standalone === true
+              );
+              const iOSNeedsInstall = isIOS && !isStandalone;
+
+              return (
+                <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
+                  <div className="px-4 py-2.5 border-b bg-slate-50/80 flex items-center gap-1.5">
+                    <Bell className="w-3.5 h-3.5 text-slate-500" />
+                    <p className="text-[8px] font-black text-slate-600 uppercase tracking-widest">Notifikasi Absen</p>
+                  </div>
+                  <div className="p-4 space-y-3">
+                    {notifPermission === 'unsupported' ? (
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] text-muted-foreground leading-snug">
+                          Browser ini belum mendukung push notification. Gunakan Chrome/Edge di Android atau install Web Absen ke Home Screen.
+                        </p>
+                        {iOSNeedsInstall && (
+                          <div className="bg-blue-50 rounded-xl border border-blue-200 px-3 py-2">
+                            <p className="text-[10px] text-blue-700 font-semibold">
+                              📱 iPhone: Install Web Absen ke Home Screen terlebih dahulu agar notifikasi dapat berjalan.
+                            </p>
+                          </div>
+                        )}
+                      </div>
+                    ) : notifPermission === 'denied' ? (
+                      <div className="space-y-1.5">
+                        <p className="text-[10px] text-muted-foreground leading-snug">
+                          Izin notifikasi ditolak. Aktifkan melalui pengaturan browser/HP.
+                        </p>
+                        <div className="bg-red-50 rounded-xl border border-red-200 px-3 py-2">
+                          <p className="text-[10px] text-red-700 font-semibold">
+                            Buka Pengaturan → Situs / Notifikasi → izinkan untuk halaman ini.
+                          </p>
+                        </div>
+                      </div>
+                    ) : notifSubscribed && notifPermission === 'granted' ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-green-500" />
+                          <p className="text-[11px] font-bold text-green-700">Notifikasi Aktif</p>
+                        </div>
+                        <p className="text-[9px] text-muted-foreground leading-snug">
+                          Anda akan mendapat pengingat {activeSite?.shift?.startTime ? `15 menit sebelum jam masuk (${activeSite.shift.startTime} WIB)` : 'sebelum jam masuk'} dan {activeSite?.shift?.endTime ? `sebelum jam pulang (${activeSite.shift.endTime} WIB)` : 'sebelum jam pulang'}.
+                        </p>
+                        <button
+                          onClick={disableNotifications}
+                          disabled={notifLoading}
+                          className="text-[9px] text-muted-foreground underline underline-offset-2 hover:text-slate-700"
+                        >
+                          {notifLoading ? 'Memproses…' : 'Nonaktifkan notifikasi'}
+                        </button>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <p className="text-[10px] text-muted-foreground leading-snug">
+                          Aktifkan pengingat agar Anda mendapat notifikasi sebelum jam masuk dan sebelum jam pulang.
+                        </p>
+                        {iOSNeedsInstall && (
+                          <div className="bg-blue-50 rounded-xl border border-blue-200 px-3 py-2">
+                            <p className="text-[10px] text-blue-700 font-semibold">
+                              📱 iPhone: Install Web Absen ke Home Screen terlebih dahulu agar notifikasi dapat berjalan.
+                            </p>
+                          </div>
+                        )}
+                        <Button
+                          onClick={enableNotifications}
+                          disabled={notifLoading || iOSNeedsInstall}
+                          variant="outline"
+                          className="w-full h-10 rounded-xl text-[11px] font-black gap-1.5 border-slate-300 text-slate-700 hover:bg-slate-50"
+                        >
+                          {notifLoading
+                            ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Mengaktifkan…</>
+                            : <><Bell className="w-3.5 h-3.5" /> Aktifkan Notifikasi</>
+                          }
+                        </Button>
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* ── Action button ─────────────────────────────────── */}
             {isAttendanceAllowed && !isFinished && (
               <Button
@@ -1723,13 +2743,9 @@ export default function AbsenPage() {
                 }`}
               >
                 {nextAction === "IN" ? (
-                  <>
-                    <LogIn className="w-5 h-5" /> Kehadiran Masuk
-                  </>
+                  <><LogIn className="w-5 h-5" /> Kehadiran Masuk</>
                 ) : (
-                  <>
-                    <LogOut className="w-5 h-5" /> Kehadiran Pulang
-                  </>
+                  <><LogOut className="w-5 h-5" /> Kehadiran Pulang</>
                 )}
               </Button>
             )}
@@ -1737,9 +2753,7 @@ export default function AbsenPage() {
             {isFinished && (
               <div className="flex items-center justify-center gap-2 py-3 bg-green-50 rounded-2xl border border-green-200">
                 <CheckCircle2 className="w-4 h-4 text-green-600" />
-                <p className="text-xs font-bold text-green-700">
-                  Kehadiran hari ini selesai
-                </p>
+                <p className="text-xs font-bold text-green-700">Kehadiran hari ini selesai</p>
               </div>
             )}
 
@@ -1749,89 +2763,38 @@ export default function AbsenPage() {
             <div className="space-y-3">
               {/* A. Ringkasan Kehadiran Hari Ini */}
               <div className="bg-white rounded-2xl border shadow-sm p-3">
-                <div className="flex items-center justify-between">
+                <div className="flex items-center justify-between mb-2">
                   <p className="text-[9px] font-black text-muted-foreground uppercase">
                     Ringkasan Kehadiran Hari Ini
                   </p>
                   <span className="text-[11px] font-bold text-muted-foreground">
-                    {todayStatus.hasIn
-                      ? todayStatus.hasOut
-                        ? "Selesai"
-                        : "Sedang Bekerja"
-                      : "Belum Kehadiran"}
+                    {todayStatus.hasIn ? (todayStatus.hasOut ? "Selesai" : "Sedang Bekerja") : "Belum Kehadiran"}
                   </span>
                 </div>
-                <div className="mt-2 grid grid-cols-3 gap-2 text-center">
-                  <div className="text-[12px]">
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="bg-muted/10 rounded-xl p-2">
                     <p className="text-[9px] text-muted-foreground">Masuk</p>
-                    <p className="font-black tabular-nums">
-                      {todayCheckIn ? format(todayCheckIn._date, "HH:mm") : "-"}
+                    <p className="font-black tabular-nums text-sm">
+                      {todayCheckIn ? format(todayCheckIn._date, "HH:mm") : "—"}
                     </p>
+                    {todayCheckIn?.status === 'LATE' && (
+                      <p className="text-[9px] text-red-600 font-bold">
+                        Terlambat {todayCheckIn.lateMinutes}m
+                        {todayCheckIn.allowedCheckInTime && ` · batas ${todayCheckIn.allowedCheckInTime}`}
+                      </p>
+                    )}
+                    {todayCheckIn?.status === 'ON_TIME' && (
+                      <p className="text-[9px] text-green-600 font-bold">Tepat Waktu</p>
+                    )}
                   </div>
-                  <div className="text-[12px]">
+                  <div className="bg-muted/10 rounded-xl p-2">
                     <p className="text-[9px] text-muted-foreground">Pulang</p>
-                    <p className="font-black tabular-nums">
-                      {todayCheckOut
-                        ? format(todayCheckOut._date, "HH:mm")
-                        : "-"}
+                    <p className="font-black tabular-nums text-sm">
+                      {todayCheckOut ? format(todayCheckOut._date, "HH:mm") : "—"}
                     </p>
-                  </div>
-                  <div className="text-[12px]">
-                    <p className="text-[9px] text-muted-foreground">
-                      Lokasi terakhir
-                    </p>
-                    <p className="text-[11px] text-muted-foreground truncate">
-                      {(todayCheckIn?.addressDetail &&
-                        shortAddr(
-                          todayCheckIn.addressDetail as AddressDetail,
-                        )) ||
-                        (todayCheckOut?.addressDetail &&
-                          shortAddr(
-                            todayCheckOut.addressDetail as AddressDetail,
-                          )) ||
-                        "-"}
-                    </p>
-                  </div>
-                </div>
-              </div>
-
-              {/* C. Alur Kehadiran */}
-              <div className="bg-white rounded-2xl border shadow-sm p-3">
-                <p className="text-[9px] font-black text-muted-foreground uppercase mb-2">
-                  Alur Kehadiran
-                </p>
-                <div className="flex items-center justify-between text-[12px]">
-                  <div className="flex-1 text-center">
-                    <div className="w-7 h-7 mx-auto rounded-full bg-primary/10 text-primary flex items-center justify-center font-black">
-                      1
-                    </div>
-                    <p className="mt-1 text-[10px] text-muted-foreground">
-                      Ambil Lokasi
-                    </p>
-                  </div>
-                  <div className="flex-1 text-center">
-                    <div className="w-7 h-7 mx-auto rounded-full bg-primary/10 text-primary flex items-center justify-center font-black">
-                      2
-                    </div>
-                    <p className="mt-1 text-[10px] text-muted-foreground">
-                      Ambil Foto
-                    </p>
-                  </div>
-                  <div className="flex-1 text-center">
-                    <div className="w-7 h-7 mx-auto rounded-full bg-primary/10 text-primary flex items-center justify-center font-black">
-                      3
-                    </div>
-                    <p className="mt-1 text-[10px] text-muted-foreground">
-                      Preview Bukti
-                    </p>
-                  </div>
-                  <div className="flex-1 text-center">
-                    <div className="w-7 h-7 mx-auto rounded-full bg-primary/10 text-primary flex items-center justify-center font-black">
-                      4
-                    </div>
-                    <p className="mt-1 text-[10px] text-muted-foreground">
-                      Kirim Kehadiran
-                    </p>
+                    {todayCheckOut?.status === 'EARLY_LEAVE' && (
+                      <p className="text-[9px] text-orange-600 font-bold">Pulang Awal</p>
+                    )}
                   </div>
                 </div>
               </div>
@@ -1850,48 +2813,36 @@ export default function AbsenPage() {
                           ? ev.tsClient.toDate()
                           : ev.tsClient ? new Date(ev.tsClient) : null;
                         if (dt && isNaN(dt.getTime())) dt = null;
-                      } catch {
-                        dt = null;
-                      }
+                      } catch { dt = null; }
                       if (!dt) return null;
                       return (
-                        <div
-                          key={ev.id || ev.tsClient}
-                          className="flex items-center justify-between"
-                        >
+                        <div key={ev.id || ev.tsClient} className="flex items-center justify-between">
                           <div>
                             <p className="text-[11px] font-black">
                               {format(dt, "dd MMM", { locale: localeId })}
                             </p>
                             <p className="text-[10px] text-muted-foreground">
-                              {ev.type === "IN"
-                                ? "Kehadiran Masuk"
-                                : "Kehadiran Pulang"}
+                              {ev.type === "IN" ? "Kehadiran Masuk" : "Kehadiran Pulang"}
                             </p>
                           </div>
                           <div className="text-right">
-                            <p className="font-black tabular-nums">
-                              {format(dt, "HH:mm")}
-                            </p>
-                            <p className="text-[10px] text-muted-foreground">
-                              {ev.status || "-"}
+                            <p className="font-black tabular-nums">{format(dt, "HH:mm")}</p>
+                            <p className={`text-[10px] ${ev.status === 'LATE' ? 'text-red-600 font-bold' : 'text-muted-foreground'}`}>
+                              {ev.status === 'LATE' ? `Terlambat ${ev.lateMinutes}m` : ev.status === 'ON_TIME' ? 'Tepat Waktu' : ev.status || "—"}
                             </p>
                           </div>
                         </div>
                       );
                     })
                   ) : (
-                    <p className="text-[11px] text-muted-foreground">
-                      Belum ada aktivitas kehadiran.
-                    </p>
+                    <p className="text-[11px] text-muted-foreground">Belum ada aktivitas kehadiran.</p>
                   )}
                 </div>
               </div>
 
               {/* E. Informasi Singkat */}
-              <div className="bg-muted/5 rounded-2xl border p-3 text-[12px] text-muted-foreground">
-                Pastikan lokasi aktif dan wajah terlihat jelas saat mengambil
-                foto kehadiran.
+              <div className="bg-muted/5 rounded-2xl border p-3 text-[11px] text-muted-foreground">
+                Pastikan lokasi aktif dan wajah terlihat jelas saat mengambil foto kehadiran.
               </div>
             </div>
           </TabsContent>
@@ -2053,13 +3004,23 @@ export default function AbsenPage() {
                             ? shortAddr(checkOut.addressDetail as AddressDetail) || checkOut.address
                             : checkOut?.address || null;
 
-                          // Resolve Drive fileId: prefer explicit field, fall back to extracting from URL
+                          // Resolve Drive fileId untuk foto masuk
                           const driveFileId = checkIn?.evidence?.driveFileId
                             || extractDriveFileId(checkIn?.evidence?.driveViewUrl)
                             || extractDriveFileId(checkIn?.evidence?.selfieUrl)
+                            || extractDriveFileId(checkIn?.checkInSelfieUrl)
+                            || extractDriveFileId(checkIn?.checkInPhotoUrl)
                             || extractDriveFileId(checkIn?.photoUrl)
                             || null;
                           const photoAccessible = driveFileId ? isPhotoWithin7Days(date) : false;
+                          // Resolve Drive fileId untuk foto pulang
+                          const driveFileIdOut = checkOut?.evidence?.driveFileId
+                            || extractDriveFileId(checkOut?.evidence?.driveViewUrl)
+                            || extractDriveFileId(checkOut?.checkOutSelfieUrl)
+                            || extractDriveFileId(checkOut?.checkOutPhotoUrl)
+                            || extractDriveFileId(checkOut?.photoUrl)
+                            || null;
+                          const photoOutAccessible = driveFileIdOut ? isPhotoWithin7Days(date) : false;
 
                           const dailyBadge = (() => {
                             switch (dailyStatus) {
@@ -2162,21 +3123,99 @@ export default function AbsenPage() {
                                   </div>
                                 )}
 
-                                {/* Foto bukti masuk — link kecil, hanya ≤7 hari */}
-                                {driveFileId && (
-                                  photoAccessible ? (
-                                    <button
-                                      onClick={() => setPhotoModal({ fileId: driveFileId, date, dateLabel, checkInTime: checkIn ? format(checkIn._date, "HH:mm") : null })}
-                                      className="flex items-center gap-1 text-[8px] text-primary font-semibold underline underline-offset-2 hover:text-primary/70 transition-colors"
-                                    >
-                                      <Camera className="w-2.5 h-2.5 shrink-0" /> Lihat foto masuk
-                                    </button>
-                                  ) : (
-                                    <p className="text-[8px] text-muted-foreground italic flex items-center gap-1">
-                                      <Camera className="w-2.5 h-2.5 shrink-0 opacity-40" /> Foto bukti sudah kedaluwarsa (&gt;7 hari)
-                                    </p>
-                                  )
-                                )}
+                                {/* ── Foto & Bukti Kondisi ─────────────────── */}
+                                {(() => {
+                                  const checkInCondId = checkIn?.checkInConditionReportId || null;
+                                  const checkOutCondId = checkOut?.checkOutConditionReportId || null;
+                                  const hasCondition = !!(checkIn?.hasConditionReport || checkInCondId || checkOutCondId);
+                                  const needsReview = !!(checkIn?.needsHrdReview || checkIn?.checkInNeedsReview || checkOut?.needsHrdReview || checkOut?.checkOutNeedsReview);
+
+                                  return (
+                                    <div className="space-y-1.5 border-t pt-2">
+                                      {/* Selfie masuk */}
+                                      {driveFileId ? (
+                                        photoAccessible ? (
+                                          <button
+                                            onClick={() => setPhotoModal({ fileId: driveFileId, date, dateLabel, checkInTime: checkIn ? format(checkIn._date, "HH:mm") : null })}
+                                            className="flex items-center gap-1 text-[8px] text-primary font-semibold underline underline-offset-2 hover:text-primary/70 transition-colors"
+                                          >
+                                            <Camera className="w-2.5 h-2.5 shrink-0" /> Foto Selfie Masuk
+                                          </button>
+                                        ) : (
+                                          <p className="text-[8px] text-muted-foreground italic flex items-center gap-1">
+                                            <Camera className="w-2.5 h-2.5 shrink-0 opacity-40" /> Foto Selfie Masuk kedaluwarsa
+                                          </p>
+                                        )
+                                      ) : null}
+
+                                      {/* Selfie pulang */}
+                                      {driveFileIdOut ? (
+                                        photoOutAccessible ? (
+                                          <button
+                                            onClick={() => setPhotoModal({ fileId: driveFileIdOut, date, dateLabel, checkInTime: checkOut ? format(checkOut._date, "HH:mm") : null })}
+                                            className="flex items-center gap-1 text-[8px] text-secondary font-semibold underline underline-offset-2 hover:text-secondary/70 transition-colors"
+                                          >
+                                            <Camera className="w-2.5 h-2.5 shrink-0" /> Foto Selfie Pulang
+                                          </button>
+                                        ) : (
+                                          <p className="text-[8px] text-muted-foreground italic flex items-center gap-1">
+                                            <Camera className="w-2.5 h-2.5 shrink-0 opacity-40" /> Foto Selfie Pulang kedaluwarsa
+                                          </p>
+                                        )
+                                      ) : null}
+
+                                      {/* Kondisi khusus */}
+                                      {hasCondition && (
+                                        <div className="space-y-1 mt-0.5">
+                                          <div className="flex items-center gap-1.5 flex-wrap">
+                                            <Badge className="text-[7px] border-none bg-amber-100 text-amber-800">
+                                              <ShieldAlert className="w-2 h-2 mr-0.5" /> Ada laporan kondisi khusus
+                                            </Badge>
+                                            {needsReview && (
+                                              <Badge className="text-[7px] border-none bg-yellow-100 text-yellow-800">
+                                                Perlu Review HRD
+                                              </Badge>
+                                            )}
+                                          </div>
+                                          {/* Bukti Kondisi Masuk */}
+                                          {checkInCondId && (
+                                            <button
+                                              onClick={() => openConditionReportById(checkInCondId)}
+                                              disabled={fetchingConditionId === checkInCondId}
+                                              className="flex items-center gap-1 text-[8px] text-amber-700 font-semibold underline underline-offset-2 hover:text-amber-600 transition-colors disabled:opacity-50"
+                                            >
+                                              {fetchingConditionId === checkInCondId
+                                                ? <Loader2 className="w-2.5 h-2.5 shrink-0 animate-spin" />
+                                                : <ShieldAlert className="w-2.5 h-2.5 shrink-0" />
+                                              }
+                                              Lihat Bukti Kondisi Masuk
+                                            </button>
+                                          )}
+                                          {/* Bukti Kondisi Pulang */}
+                                          {checkOutCondId && (
+                                            <button
+                                              onClick={() => openConditionReportById(checkOutCondId)}
+                                              disabled={fetchingConditionId === checkOutCondId}
+                                              className="flex items-center gap-1 text-[8px] text-blue-700 font-semibold underline underline-offset-2 hover:text-blue-600 transition-colors disabled:opacity-50"
+                                            >
+                                              {fetchingConditionId === checkOutCondId
+                                                ? <Loader2 className="w-2.5 h-2.5 shrink-0 animate-spin" />
+                                                : <ShieldAlert className="w-2.5 h-2.5 shrink-0" />
+                                              }
+                                              Lihat Bukti Kondisi Pulang
+                                            </button>
+                                          )}
+                                          {/* Fallback: hasConditionReport tapi belum ada typed ID */}
+                                          {checkIn?.hasConditionReport && !checkInCondId && !checkOutCondId && (
+                                            <p className="text-[8px] text-amber-700 font-semibold flex items-center gap-1">
+                                              <ShieldAlert className="w-2.5 h-2.5 shrink-0" /> Bukti kondisi tersimpan di laporan
+                                            </p>
+                                          )}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
                               </div>
                             </div>
                           );
@@ -2204,7 +3243,7 @@ export default function AbsenPage() {
             {/* Modal header */}
             <div className="flex items-center justify-between px-4 py-3 border-b">
               <div>
-                <p className="text-xs font-bold">Foto Bukti Masuk</p>
+                <p className="text-xs font-bold">Selfie Kehadiran</p>
                 <p className="text-[9px] text-muted-foreground">
                   {photoModal.dateLabel}
                   {photoModal.checkInTime ? ` · ${photoModal.checkInTime} WIB` : ""}
@@ -2240,6 +3279,168 @@ export default function AbsenPage() {
               <p className="text-[9px] text-muted-foreground text-center">
                 Foto bukti hanya tersedia dalam 7 hari sejak tanggal absen.
               </p>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ── Modal: Foto Bukti Kondisi Khusus ───────────────────────────────────── */}
+      {conditionPhotoModal && (() => {
+        const { report, fileId, directUrl } = conditionPhotoModal;
+        const reportedTime = report.reportedAt
+          ? format(new Date(report.reportedAt), "HH:mm", { locale: localeId })
+          : null;
+        const addr = report.reportLocationAddress || report.address?.full || null;
+        const typeLabel = report.reportType === 'check_out' ? 'Bukti Kondisi Pulang' : 'Bukti Kondisi Masuk';
+        const reviewBadgeStyle = report.reviewStatus === 'accepted'
+          ? 'bg-green-100 text-green-700'
+          : report.reviewStatus === 'rejected'
+          ? 'bg-red-100 text-red-700'
+          : 'bg-yellow-100 text-yellow-800';
+        const reviewLabel = report.reviewStatus === 'accepted' ? 'Diterima HRD' : report.reviewStatus === 'rejected' ? 'Ditolak HRD' : 'Menunggu Review HRD';
+
+        return (
+          <div
+            className="fixed inset-0 z-50 bg-black/70 flex items-end justify-center"
+            onClick={() => setConditionPhotoModal(null)}
+          >
+            <div
+              className="bg-white w-full max-w-md rounded-t-3xl overflow-hidden"
+              onClick={(e) => e.stopPropagation()}
+            >
+              {/* Header */}
+              <div className="flex items-center justify-between px-4 py-3 border-b">
+                <div>
+                  <p className="text-xs font-bold">{typeLabel}</p>
+                  <p className="text-[9px] text-muted-foreground">
+                    {report.reasonLabel}
+                    {reportedTime ? ` · ${reportedTime} WIB` : ""}
+                  </p>
+                </div>
+                <button
+                  onClick={() => setConditionPhotoModal(null)}
+                  className="p-1.5 rounded-full hover:bg-muted transition-colors"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Image */}
+              <div className="bg-black flex items-center justify-center min-h-[180px]">
+                {fileId ? (
+                  <img
+                    src={`/api/attendance-photo?fileId=${encodeURIComponent(fileId)}&date=${encodeURIComponent(report.reportDate || "")}`}
+                    alt="Foto bukti kondisi"
+                    className="w-full max-h-[55vh] object-contain"
+                    onError={(e) => {
+                      const el = e.currentTarget;
+                      el.style.display = "none";
+                      const fallback = document.createElement("p");
+                      fallback.className = "text-white text-xs p-6 text-center opacity-70";
+                      fallback.textContent = "Foto bukti tidak bisa dimuat. Coba ulangi atau hubungi HRD/Admin.";
+                      el.parentElement?.appendChild(fallback);
+                    }}
+                  />
+                ) : directUrl ? (
+                  <img
+                    src={directUrl}
+                    alt="Foto bukti kondisi"
+                    className="w-full max-h-[55vh] object-contain"
+                    onError={(e) => {
+                      const el = e.currentTarget;
+                      el.style.display = "none";
+                      const fallback = document.createElement("p");
+                      fallback.className = "text-white text-xs p-6 text-center opacity-70";
+                      fallback.textContent = "Foto bukti tidak bisa dimuat. Coba ulangi atau hubungi HRD/Admin.";
+                      el.parentElement?.appendChild(fallback);
+                    }}
+                  />
+                ) : (
+                  <p className="text-white text-xs p-6 text-center opacity-70">
+                    Foto bukti tidak tersedia.
+                  </p>
+                )}
+              </div>
+
+              {/* Detail */}
+              <div className="px-4 py-3 space-y-1.5">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <Badge className={`text-[7px] border-none ${reviewBadgeStyle}`}>{reviewLabel}</Badge>
+                </div>
+                {report.note && (
+                  <p className="text-[10px] text-slate-700">
+                    <span className="font-semibold text-slate-500">Catatan: </span>
+                    {report.note}
+                  </p>
+                )}
+                {reportedTime && (
+                  <p className="text-[9px] text-muted-foreground">Dilaporkan pukul {reportedTime} WIB</p>
+                )}
+                {addr && (
+                  <p className="text-[9px] text-muted-foreground line-clamp-2">📍 {addr}</p>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* ── Modal: Panduan Install (iOS + browser lain) ───────────── */}
+      {showInstallGuide && (
+        <div className="fixed inset-0 z-50 flex items-end justify-center bg-black/60 p-4">
+          <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden">
+            <div className="px-6 pt-6 pb-4">
+              <div className="flex items-center justify-between mb-4">
+                <p className="font-black text-base">📲 Pasang Web Absen</p>
+                <button onClick={() => setShowInstallGuide(false)} className="text-muted-foreground p-1">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              {isIosBrowser ? (
+                /* iOS / Safari */
+                <>
+                  <p className="text-[11px] text-muted-foreground mb-4">
+                    Buka halaman ini di <strong>Safari</strong>, lalu ikuti langkah berikut:
+                  </p>
+                  <ol className="space-y-3">
+                    {[
+                      ['1', 'Tekan tombol Share ↑ di toolbar bawah Safari'],
+                      ['2', 'Scroll ke bawah, pilih "Add to Home Screen"'],
+                      ['3', 'Tekan "Add" di pojok kanan atas'],
+                    ].map(([n, text]) => (
+                      <li key={n} className="flex items-start gap-3">
+                        <span className="w-6 h-6 rounded-full bg-primary/10 text-primary font-black text-xs flex items-center justify-center shrink-0 mt-0.5">{n}</span>
+                        <span className="text-sm text-slate-700">{text}</span>
+                      </li>
+                    ))}
+                  </ol>
+                  <p className="text-[10px] text-muted-foreground mt-3 text-center">
+                    Web Absen akan muncul sebagai ikon di layar utama iPhone Anda.
+                  </p>
+                </>
+              ) : (
+                /* Android / browser lain */
+                <>
+                  <p className="text-[11px] text-muted-foreground mb-3">
+                    Install otomatis belum tersedia di browser ini. Gunakan menu browser:
+                  </p>
+                  <div className="bg-slate-50 rounded-xl p-3 space-y-2 text-sm text-slate-700">
+                    <p>• <strong>Chrome Android:</strong> Menu ⋮ → <em>Install App</em> / <em>Add to Home Screen</em></p>
+                    <p>• <strong>Edge Android:</strong> Menu … → <em>Add to Phone</em></p>
+                    <p>• <strong>Samsung Browser:</strong> Menu → <em>Tambah ke Beranda</em></p>
+                    <p>• <strong>Firefox:</strong> Menu → <em>Install</em></p>
+                  </div>
+                </>
+              )}
+            </div>
+            <div className="px-6 pb-6 pt-2">
+              <button
+                onClick={() => setShowInstallGuide(false)}
+                className="w-full h-12 rounded-2xl bg-primary text-white font-black text-sm"
+              >
+                Mengerti
+              </button>
             </div>
           </div>
         </div>

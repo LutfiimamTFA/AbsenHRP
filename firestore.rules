@@ -123,6 +123,22 @@ service cloud.firestore {
     }
 
 
+    // ── Push Notification Tokens ─────────────────────────────────────────────
+    match /attendance_notification_tokens/{tokenId} {
+      // User boleh create/read/update token miliknya sendiri
+      allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
+      allow read, update: if isSignedIn() && resource.data.uid == request.auth.uid;
+      // HRD/Admin bisa baca semua untuk monitoring
+      allow list, read: if isPrivileged();
+    }
+
+    // ── Push Notification Logs ───────────────────────────────────────────────
+    match /attendance_notification_logs/{logId} {
+      // Log dibuat server-side; user hanya bisa baca log miliknya
+      allow read: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow list: if isPrivileged();
+    }
+
     // ── Fallback: HRD/Admin baca semua ───────────────────────────────────────
     // Hanya berlaku untuk path yang belum punya rule spesifik di atas
     match /{path=**} {
