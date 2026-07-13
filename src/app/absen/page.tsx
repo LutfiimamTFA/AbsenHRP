@@ -1,5 +1,12 @@
 "use client";
 
+// Extend Window so TypeScript knows about the global install prompt slot
+declare global {
+  interface Window {
+    deferredPwaPrompt?: any;
+  }
+}
+
 import React, {
   useState,
   useEffect,
@@ -295,12 +302,13 @@ export default function AbsenPage() {
   const [notifSubscribed, setNotifSubscribed] = useState(false);
   const [notifLoading, setNotifLoading] = useState(false);
 
-  // PWA install
-  const [deferredPrompt, setDeferredPrompt]   = useState<any>(null);
-  const [canInstallApp, setCanInstallApp]     = useState(false);
-  const [isInstalled, setIsInstalled]         = useState(false);
+  // PWA install — status machine
+  type InstallStatus = 'checking' | 'ready' | 'installed' | 'unsupported' | 'ios' | 'dismissed';
+  const [installStatus, setInstallStatus]     = useState<InstallStatus>('checking');
   const [isIosBrowser, setIsIosBrowser]       = useState(false);
   const [showInstallGuide, setShowInstallGuide] = useState(false);
+  // Derived helpers for backward compat with renderHeader
+  const isInstalled = installStatus === 'installed';
 
   // History filters — simplified: "today" or "pick" (single date)
   const [historyMode, setHistoryMode] = useState<"today" | "pick">("today");
@@ -355,39 +363,65 @@ export default function AbsenPage() {
 
   // ── PWA install prompt ────────────────────────────────────────
   useEffect(() => {
-    // Deteksi sudah standalone (sudah diinstall)
+    // 1. Detect already-installed (standalone mode)
     const standalone =
       window.matchMedia('(display-mode: standalone)').matches ||
       (navigator as any).standalone === true;
-    if (standalone) { setIsInstalled(true); }
+    if (standalone) {
+      setInstallStatus('installed');
+      return;
+    }
 
-    // Deteksi iOS
+    // 2. Detect iOS — no beforeinstallprompt support
     const ios = /iphone|ipad|ipod/i.test(navigator.userAgent);
     setIsIosBrowser(ios);
+    if (ios) {
+      setInstallStatus('ios');
+    }
 
-    const handleBefore = (e: any) => {
-      e.preventDefault();
-      setDeferredPrompt(e);
-      setCanInstallApp(true);
+    // 3. Check if the inline <script> already captured the prompt before hydration
+    if (window.deferredPwaPrompt) {
+      setInstallStatus('ready');
+    } else if (!ios) {
+      // Not standalone, not iOS, no prompt yet — stay 'checking'
+      setInstallStatus('checking');
+    }
+
+    // 4. Listen for prompt becoming available (fires if browser fires it after hydration,
+    //    or redispatched by the inline script's CustomEvent)
+    const onInstallReady = () => {
+      if (window.deferredPwaPrompt) setInstallStatus('ready');
     };
-    const handleInstalled = () => {
-      setIsInstalled(true);
-      setCanInstallApp(false);
-      setDeferredPrompt(null);
+    const onAppInstalled = () => {
+      window.deferredPwaPrompt = undefined;
+      setInstallStatus('installed');
     };
 
-    window.addEventListener('beforeinstallprompt', handleBefore);
-    window.addEventListener('appinstalled', handleInstalled);
+    window.addEventListener('pwa-install-ready', onInstallReady);
+    window.addEventListener('pwa-app-installed', onAppInstalled);
 
+    // 5. Register / confirm service worker
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(err => {
-        console.error('[SW] Registration failed:', err);
-      });
+      navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        .then(reg => {
+          console.log('[SW] Registered, scope:', reg.scope);
+          return navigator.serviceWorker.ready;
+        })
+        .then(() => {
+          console.log('[SW] Active and ready.');
+          // Re-check prompt after SW is ready (sometimes prompt fires just after SW ready)
+          if (window.deferredPwaPrompt) setInstallStatus('ready');
+        })
+        .catch(err => {
+          console.error('[SW] Registration failed:', err);
+        });
+    } else if (!ios) {
+      setInstallStatus('unsupported');
     }
 
     return () => {
-      window.removeEventListener('beforeinstallprompt', handleBefore);
-      window.removeEventListener('appinstalled', handleInstalled);
+      window.removeEventListener('pwa-install-ready', onInstallReady);
+      window.removeEventListener('pwa-app-installed', onAppInstalled);
     };
   }, []);
 
@@ -1004,23 +1038,26 @@ export default function AbsenPage() {
 
   // ── PWA install handler ────────────────────────────────────────
   const handleInstallApp = useCallback(async () => {
-    if (isInstalled) {
+    if (installStatus === 'installed') {
       toast({ title: 'Sudah terpasang', description: 'Web Absen sudah terpasang sebagai aplikasi di perangkat ini.' });
       return;
     }
-    if (deferredPrompt) {
-      deferredPrompt.prompt();
-      const { outcome } = await deferredPrompt.userChoice;
+    const prompt = window.deferredPwaPrompt;
+    if (prompt) {
+      await prompt.prompt();
+      const { outcome } = await prompt.userChoice;
+      window.deferredPwaPrompt = undefined;
       if (outcome === 'accepted') {
+        setInstallStatus('installed');
         toast({ title: 'Berhasil dipasang', description: 'Web Absen berhasil dipasang ke layar utama.' });
+      } else {
+        setInstallStatus('dismissed');
       }
-      setDeferredPrompt(null);
-      setCanInstallApp(false);
       return;
     }
     // iOS atau browser tanpa dukungan prompt
     setShowInstallGuide(true);
-  }, [isInstalled, deferredPrompt, toast]);
+  }, [installStatus, toast]);
 
   // ── Push Notification: subscribe ─────────────────────────────
   function urlBase64ToUint8Array(base64String: string): Uint8Array {
@@ -3352,20 +3389,28 @@ export default function AbsenPage() {
       </div>
 
       {/* ── Sticky Install CTA ──────────────────────────────────────────────── */}
-      {!isInstalled && (
+      {installStatus !== 'installed' && (
         <div className="sticky bottom-0 z-40 max-w-md mx-auto w-full px-4 pb-4 pt-2 bg-gradient-to-t from-background via-background/95 to-transparent pointer-events-none">
           <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl px-4 py-3 flex items-center gap-3">
             <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center shrink-0 text-lg">📲</div>
             <div className="flex-1 min-w-0">
               <p className="text-[11px] font-black text-slate-800 leading-tight">Pasang Aplikasi Web Absen</p>
-              <p className="text-[9px] text-muted-foreground leading-snug">Akses lebih cepat &amp; dapatkan pengingat absen.</p>
+              <p className="text-[9px] text-muted-foreground leading-snug">
+                {installStatus === 'dismissed'
+                  ? 'Instalasi dibatalkan. Tekan Pasang kapan saja.'
+                  : 'Akses lebih cepat & dapatkan pengingat absen.'}
+              </p>
             </div>
             <Button
               onClick={handleInstallApp}
               size="sm"
-              className="rounded-xl text-[11px] font-black h-9 px-3 shrink-0 bg-primary text-white hover:bg-primary/90"
+              disabled={installStatus === 'checking'}
+              className="rounded-xl text-[11px] font-black h-9 px-3 shrink-0 bg-primary text-white hover:bg-primary/90 disabled:opacity-60"
             >
-              {isIosBrowser ? 'Cara Pasang' : 'Pasang'}
+              {installStatus === 'checking'
+                ? <><Loader2 className="w-3.5 h-3.5 animate-spin mr-1" />Menyiapkan…</>
+                : installStatus === 'ios' ? 'Cara Pasang'
+                : 'Pasang'}
             </Button>
           </div>
         </div>

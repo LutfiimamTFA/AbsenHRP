@@ -16,6 +16,20 @@ export default function RootLayout({
   return (
     <html lang="en">
       <head>
+        {/* Capture beforeinstallprompt BEFORE React hydration so it is never missed */}
+        <script dangerouslySetInnerHTML={{ __html: `
+(function(){
+  window.addEventListener('beforeinstallprompt', function(e){
+    e.preventDefault();
+    window.deferredPwaPrompt = e;
+    window.dispatchEvent(new CustomEvent('pwa-install-ready'));
+  });
+  window.addEventListener('appinstalled', function(){
+    window.deferredPwaPrompt = undefined;
+    window.dispatchEvent(new CustomEvent('pwa-app-installed'));
+  });
+})();
+        `}} />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" />
