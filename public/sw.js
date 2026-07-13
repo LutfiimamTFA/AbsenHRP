@@ -9,14 +9,12 @@ const PRECACHE = [
   '/icon-maskable-192.png',
   '/icon-maskable-512.png',
   '/notification-icon.png',
-  '/shortcut-192.png',
-  '/shortcut-512.png',
 ];
 
 self.addEventListener('install', e => {
   e.waitUntil(
     caches.open(CACHE)
-      .then(c => c.addAll(PRECACHE))
+      .then(c => c.addAll(PRECACHE).catch(err => console.warn('[SW] precache partial failure:', err)))
       .then(() => self.skipWaiting())
   );
 });

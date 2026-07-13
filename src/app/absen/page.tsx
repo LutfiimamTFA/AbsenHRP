@@ -1067,45 +1067,83 @@ export default function AbsenPage() {
     return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
   }
 
+  function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
+    return Promise.race([
+      promise,
+      new Promise<T>((_, reject) =>
+        setTimeout(() => reject(new Error(`Timeout: ${label} (${ms / 1000}s)`)), ms)
+      ),
+    ]);
+  }
+
   const enableNotifications = useCallback(async () => {
     if (notifLoading || !user) return;
     if (typeof Notification === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
       setNotifPermission('unsupported');
       return;
     }
+    // iOS: only allow from standalone (Home Screen) on iOS 16.4+
+    const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || (navigator as any).standalone === true;
+    if (isIOS && !isStandalone) {
+      toast({ title: 'Buka dari Home Screen', description: 'Pasang EGS Attendance ke Home Screen terlebih dahulu, lalu buka dari sana untuk mengaktifkan notifikasi.' });
+      return;
+    }
     setNotifLoading(true);
     try {
-      const perm = await Notification.requestPermission();
+      const perm = await withTimeout(
+        Promise.resolve(Notification.requestPermission()),
+        20000,
+        'izin notifikasi'
+      );
       setNotifPermission(perm as any);
+      if (perm === 'denied') {
+        toast({
+          variant: 'destructive',
+          title: 'Izin notifikasi ditolak',
+          description: isIOS
+            ? 'Buka Pengaturan → EGS Attendance → Notifikasi, lalu aktifkan.'
+            : 'Buka pengaturan browser → izinkan notifikasi untuk situs ini.',
+        });
+        setNotifLoading(false); return;
+      }
       if (perm !== 'granted') { setNotifLoading(false); return; }
 
-      const reg = await navigator.serviceWorker.ready;
+      const reg = await withTimeout(navigator.serviceWorker.ready, 10000, 'service worker');
       const existing = await reg.pushManager.getSubscription();
       const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
       if (!vapidKey) throw new Error('VAPID public key tidak dikonfigurasi');
-      const sub = existing || await reg.pushManager.subscribe({
-        userVisibleOnly: true,
-        applicationServerKey: urlBase64ToUint8Array(vapidKey).buffer as ArrayBuffer,
-      });
+      const sub = existing || await withTimeout(
+        reg.pushManager.subscribe({
+          userVisibleOnly: true,
+          applicationServerKey: urlBase64ToUint8Array(vapidKey).buffer as ArrayBuffer,
+        }),
+        15000,
+        'push subscribe'
+      );
 
       const { getAuth } = await import('firebase/auth');
       const idToken = await getAuth().currentUser?.getIdToken();
       if (!idToken) throw new Error('Sesi login tidak ditemukan. Silakan login ulang.');
 
-      const res = await fetch('/api/attendance/notifications/subscribe', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
-        body: JSON.stringify({
-          subscription: sub.toJSON(),
-          uid: user.uid,
-          employeeName: user.displayName || null,
-          employeeEmail: (user as any).email || null,
-          brandId: user.brandId || null,
-          siteId: activeSite?.id || null,
-          platform: (navigator as any).standalone || window.matchMedia('(display-mode: standalone)').matches ? 'pwa' : 'browser',
-          userAgent: navigator.userAgent,
+      const res = await withTimeout(
+        fetch('/api/attendance/notifications/subscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+          body: JSON.stringify({
+            subscription: sub.toJSON(),
+            uid: user.uid,
+            employeeName: user.displayName || null,
+            employeeEmail: (user as any).email || null,
+            brandId: user.brandId || null,
+            siteId: activeSite?.id || null,
+            platform: (navigator as any).standalone || window.matchMedia('(display-mode: standalone)').matches ? 'pwa' : 'browser',
+            userAgent: navigator.userAgent,
+          }),
         }),
-      });
+        15000,
+        'server subscribe'
+      );
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) {
         throw new Error(data.error || `Server error ${res.status}`);
@@ -1125,7 +1163,7 @@ export default function AbsenPage() {
     if (!user) return;
     setNotifLoading(true);
     try {
-      const reg = await navigator.serviceWorker.ready;
+      const reg = await withTimeout(navigator.serviceWorker.ready, 10000, 'service worker');
       const sub = await reg.pushManager.getSubscription();
       if (sub) await sub.unsubscribe();
 
@@ -3411,7 +3449,7 @@ export default function AbsenPage() {
             >
               {installStatus === 'checking'
                 ? <><Loader2 className="w-3.5 h-3.5 animate-spin mr-1" />Menyiapkan…</>
-                : installStatus === 'ios' ? 'Cara Pasang'
+                : installStatus === 'ios' ? 'Lihat Cara Pasang'
                 : 'Pasang'}
             </Button>
           </div>
@@ -3598,7 +3636,9 @@ export default function AbsenPage() {
                     {[
                       ['1', 'Tekan tombol Share ↑ di toolbar bawah Safari'],
                       ['2', 'Scroll ke bawah, pilih "Add to Home Screen"'],
-                      ['3', 'Tekan "Add" di pojok kanan atas'],
+                      ['3', 'Beri nama "EGS Attendance", tekan "Add"'],
+                      ['4', 'Buka EGS Attendance dari ikon di layar utama (Home Screen)'],
+                      ['5', 'Aktifkan notifikasi di dalam aplikasi agar pengingat absen berjalan'],
                     ].map(([n, text]) => (
                       <li key={n} className="flex items-start gap-3">
                         <span className="w-6 h-6 rounded-full bg-primary/10 text-primary font-black text-xs flex items-center justify-center shrink-0 mt-0.5">{n}</span>
@@ -3606,9 +3646,11 @@ export default function AbsenPage() {
                       </li>
                     ))}
                   </ol>
-                  <p className="text-[10px] text-muted-foreground mt-3 text-center">
-                    EGS Attendance akan muncul sebagai ikon di layar utama iPhone Anda.
-                  </p>
+                  <div className="mt-3 bg-amber-50 border border-amber-200 rounded-xl px-3 py-2">
+                    <p className="text-[10px] text-amber-700 leading-snug">
+                      Push notification iPhone hanya tersedia saat aplikasi dibuka dari Home Screen (iOS 16.4+).
+                    </p>
+                  </div>
                 </>
               ) : (
                 /* Android / browser lain */
