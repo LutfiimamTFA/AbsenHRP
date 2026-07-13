@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
   }
 
   const payload = JSON.stringify({
-    title: 'Notifikasi Tes — Web Absen',
+    title: 'Notifikasi Tes — EGS Attendance',
     body: 'Push notification berhasil! Sistem notifikasi absen siap digunakan.',
     url: '/absen',
     type: 'test',

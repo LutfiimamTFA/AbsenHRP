@@ -9,9 +9,9 @@ function getRpConfig(req: NextRequest) {
   const origin = req.headers.get('origin') ?? req.nextUrl.origin;
   try {
     const url = new URL(origin);
-    return { rpID: url.hostname, rpName: 'HRP Environesia', origin };
+    return { rpID: url.hostname, rpName: 'EGS Attendance', origin };
   } catch {
-    return { rpID: 'localhost', rpName: 'HRP Environesia', origin: 'http://localhost:9002' };
+    return { rpID: 'localhost', rpName: 'EGS Attendance', origin: 'http://localhost:9002' };
   }
 }
 

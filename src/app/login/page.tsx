@@ -78,13 +78,13 @@ export default function LoginPage() {
           style={{ background: 'linear-gradient(135deg, #0f766e 0%, #134e4a 100%)' }}
         >
           <div
-            className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg"
-            style={{ background: 'rgba(255,255,255,0.15)', border: '2px solid rgba(255,255,255,0.3)' }}
+            className="w-16 h-16 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg overflow-hidden bg-white"
+            style={{ border: '2px solid rgba(255,255,255,0.45)' }}
           >
-            <span className="text-white font-black text-3xl tracking-tight">H</span>
+            <img src="/icon-192.png" alt="EGS Attendance" className="w-full h-full object-cover" />
           </div>
-          <h1 className="text-xl font-black text-white tracking-tight">HRP Environesia</h1>
-          <p className="text-sm text-teal-200 mt-0.5 font-medium">Human Capital Portal</p>
+          <h1 className="text-xl font-black text-white tracking-tight">EGS Attendance</h1>
+          <p className="text-sm text-teal-200 mt-0.5 font-medium">Attendance System</p>
         </div>
 
         {/* Form */}
@@ -156,7 +156,7 @@ export default function LoginPage() {
       </div>
 
       <p className="mt-5 text-[10px] text-teal-300/40 text-center">
-        © Environesia · Human Capital Portal
+        © Environesia Group & Greenlab · Attendance System
       </p>
     </div>
   );

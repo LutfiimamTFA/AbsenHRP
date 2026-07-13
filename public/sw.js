@@ -1,17 +1,31 @@
-const CACHE = 'web-absen-v1';
+const CACHE = 'egs-attendance-v2';
 const OFFLINE_URL = '/absen';
+const PRECACHE = [
+  OFFLINE_URL,
+  '/manifest.json',
+  '/apple-touch-icon.png',
+  '/icon-192.png',
+  '/icon-512.png',
+  '/icon-maskable-192.png',
+  '/icon-maskable-512.png',
+  '/notification-icon.png',
+  '/shortcut-192.png',
+  '/shortcut-512.png',
+];
 
 self.addEventListener('install', e => {
   e.waitUntil(
-    caches.open(CACHE).then(c => c.addAll([OFFLINE_URL])).then(() => self.skipWaiting())
+    caches.open(CACHE)
+      .then(c => c.addAll(PRECACHE))
+      .then(() => self.skipWaiting())
   );
 });
 
 self.addEventListener('activate', e => {
   e.waitUntil(
-    caches.keys().then(keys =>
-      Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k)))
-    ).then(() => self.clients.claim())
+    caches.keys()
+      .then(keys => Promise.all(keys.filter(k => k !== CACHE).map(k => caches.delete(k))))
+      .then(() => self.clients.claim())
   );
 });
 
@@ -29,21 +43,20 @@ self.addEventListener('push', e => {
   let data = {};
   try { data = e.data?.json() ?? {}; } catch {}
 
-  const title = data.title || 'Web Absen';
+  const title = data.title || 'EGS Attendance';
   const body  = data.body  || 'Ada pengingat absen untuk Anda.';
   const url   = data.url   || '/absen';
-  const icon  = '/icon-192.png';
-  const badge = '/icon-192.png';
   const tag   = data.type  || 'absen-reminder';
 
   e.waitUntil(
     self.registration.showNotification(title, {
       body,
-      icon,
-      badge,
+      icon:  '/icon-192.png',
+      badge: '/notification-icon.png',
       tag,
       renotify: false,
       requireInteraction: false,
+      vibrate: [200, 100, 200],
       data: { url },
     })
   );
@@ -55,9 +68,7 @@ self.addEventListener('notificationclick', e => {
   e.waitUntil(
     clients.matchAll({ type: 'window', includeUncontrolled: true }).then(list => {
       for (const client of list) {
-        if (client.url.includes('/absen') && 'focus' in client) {
-          return client.focus();
-        }
+        if (client.url.includes('/absen') && 'focus' in client) return client.focus();
       }
       if (clients.openWindow) return clients.openWindow(url);
     })

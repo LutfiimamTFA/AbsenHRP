@@ -1039,7 +1039,7 @@ export default function AbsenPage() {
   // ── PWA install handler ────────────────────────────────────────
   const handleInstallApp = useCallback(async () => {
     if (installStatus === 'installed') {
-      toast({ title: 'Sudah terpasang', description: 'Web Absen sudah terpasang sebagai aplikasi di perangkat ini.' });
+      toast({ title: 'Sudah terpasang', description: 'EGS Attendance sudah terpasang sebagai aplikasi di perangkat ini.' });
       return;
     }
     const prompt = window.deferredPwaPrompt;
@@ -1049,7 +1049,7 @@ export default function AbsenPage() {
       window.deferredPwaPrompt = undefined;
       if (outcome === 'accepted') {
         setInstallStatus('installed');
-        toast({ title: 'Berhasil dipasang', description: 'Web Absen berhasil dipasang ke layar utama.' });
+        toast({ title: 'Berhasil dipasang', description: 'EGS Attendance berhasil dipasang ke layar utama.' });
       } else {
         setInstallStatus('dismissed');
       }
@@ -1757,7 +1757,7 @@ export default function AbsenPage() {
           </div>
           <div className="mt-3 flex items-center justify-between gap-3">
             <Badge className="text-[9px] font-bold bg-primary/10 text-primary border-primary/20 border py-1 px-2 rounded-full">
-              Web Absen
+              EGS Attendance
             </Badge>
             <div className="flex items-center gap-1.5">
               {!showCancel && isInstalled && (
@@ -2847,12 +2847,12 @@ export default function AbsenPage() {
                     {notifPermission === 'unsupported' ? (
                       <div className="space-y-1.5">
                         <p className="text-[10px] text-muted-foreground leading-snug">
-                          Browser ini belum mendukung push notification. Gunakan Chrome/Edge di Android atau install Web Absen ke Home Screen.
+                          Browser ini belum mendukung push notification. Gunakan Chrome/Edge di Android atau pasang EGS Attendance ke Home Screen.
                         </p>
                         {iOSNeedsInstall && (
                           <div className="bg-blue-50 rounded-xl border border-blue-200 px-3 py-2">
                             <p className="text-[10px] text-blue-700 font-semibold">
-                              📱 iPhone: Install Web Absen ke Home Screen terlebih dahulu agar notifikasi dapat berjalan.
+                              iPhone: Pasang EGS Attendance ke Home Screen terlebih dahulu agar notifikasi dapat berjalan.
                             </p>
                           </div>
                         )}
@@ -2902,7 +2902,7 @@ export default function AbsenPage() {
                         {iOSNeedsInstall && (
                           <div className="bg-blue-50 rounded-xl border border-blue-200 px-3 py-2">
                             <p className="text-[10px] text-blue-700 font-semibold">
-                              📱 iPhone: Install Web Absen ke Home Screen terlebih dahulu agar notifikasi dapat berjalan.
+                              iPhone: Pasang EGS Attendance ke Home Screen terlebih dahulu agar notifikasi dapat berjalan.
                             </p>
                           </div>
                         )}
@@ -3392,13 +3392,15 @@ export default function AbsenPage() {
       {installStatus !== 'installed' && (
         <div className="sticky bottom-0 z-40 max-w-md mx-auto w-full px-4 pb-4 pt-2 bg-gradient-to-t from-background via-background/95 to-transparent pointer-events-none">
           <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl px-4 py-3 flex items-center gap-3">
-            <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center shrink-0 text-lg">📲</div>
+            <div className="w-10 h-10 rounded-xl bg-white border border-teal-100 shadow-sm overflow-hidden shrink-0">
+              <img src="/icon-192.png" alt="" aria-hidden="true" className="w-full h-full object-cover" />
+            </div>
             <div className="flex-1 min-w-0">
-              <p className="text-[11px] font-black text-slate-800 leading-tight">Pasang Aplikasi Web Absen</p>
+              <p className="text-[11px] font-black text-slate-800 leading-tight">Pasang EGS Attendance</p>
               <p className="text-[9px] text-muted-foreground leading-snug">
                 {installStatus === 'dismissed'
                   ? 'Instalasi dibatalkan. Tekan Pasang kapan saja.'
-                  : 'Akses lebih cepat & dapatkan pengingat absen.'}
+                  : 'Akses lebih cepat dan dapatkan pengingat kehadiran.'}
               </p>
             </div>
             <Button
@@ -3577,7 +3579,10 @@ export default function AbsenPage() {
           <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl overflow-hidden">
             <div className="px-6 pt-6 pb-4">
               <div className="flex items-center justify-between mb-4">
-                <p className="font-black text-base">📲 Pasang Web Absen</p>
+                <div className="flex items-center gap-2">
+                  <img src="/icon-192.png" alt="" aria-hidden="true" className="w-8 h-8 rounded-lg shadow-sm" />
+                  <p className="font-black text-base">Pasang EGS Attendance</p>
+                </div>
                 <button onClick={() => setShowInstallGuide(false)} className="text-muted-foreground p-1">
                   <X className="w-5 h-5" />
                 </button>
@@ -3602,7 +3607,7 @@ export default function AbsenPage() {
                     ))}
                   </ol>
                   <p className="text-[10px] text-muted-foreground mt-3 text-center">
-                    Web Absen akan muncul sebagai ikon di layar utama iPhone Anda.
+                    EGS Attendance akan muncul sebagai ikon di layar utama iPhone Anda.
                   </p>
                 </>
               ) : (
