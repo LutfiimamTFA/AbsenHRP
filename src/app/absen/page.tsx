@@ -434,11 +434,12 @@ export default function AbsenPage() {
     const perm = Notification.permission as NotifPermission;
     setNotifPermission(perm);
     if (perm === 'granted') {
-      // Cek apakah ada subscription aktif
-      navigator.serviceWorker.ready
-        .then(reg => reg.pushManager.getSubscription())
-        .then(sub => setNotifSubscribed(!!sub))
-        .catch(err => console.error('[SW] getSubscription error:', err));
+      // Cek apakah ada subscription aktif — gunakan getRegistration agar tidak menunggu SW aktif
+      navigator.serviceWorker.getRegistration('/').then(reg => {
+        if (reg?.active) {
+          return reg.pushManager.getSubscription().then(sub => setNotifSubscribed(!!sub));
+        }
+      }).catch(err => console.warn('[SW] init getSubscription:', err));
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -1059,7 +1060,7 @@ export default function AbsenPage() {
     setShowInstallGuide(true);
   }, [installStatus, toast]);
 
-  // ── Push Notification: subscribe ─────────────────────────────
+  // ── Push Notification: helpers ────────────────────────────────
   function urlBase64ToUint8Array(base64String: string): Uint8Array {
     const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
     const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
@@ -1076,55 +1077,142 @@ export default function AbsenPage() {
     ]);
   }
 
+  // Mendaftarkan SW dan menunggu sampai statusnya `activated`.
+  // Menangani semua status: installing → waiting → activated, dan redundant.
+  function registerAndWaitForSW(): Promise<ServiceWorkerRegistration> {
+    return new Promise((resolve, reject) => {
+      const TIMEOUT_MS = 12000;
+      let timer: ReturnType<typeof setTimeout>;
+
+      function cleanup() { clearTimeout(timer); }
+      timer = setTimeout(() => {
+        cleanup();
+        reject(new Error('Service worker tidak aktif dalam 12 detik. Coba muat ulang halaman.'));
+      }, TIMEOUT_MS);
+
+      navigator.serviceWorker.register('/sw.js', { scope: '/' })
+        .then(reg => {
+          console.log('[SW] registered, scope:', reg.scope);
+
+          // Sudah aktif — langsung selesai
+          if (reg.active) {
+            cleanup();
+            resolve(reg);
+            return;
+          }
+
+          // Tunggu transisi state pada worker yang sedang installing/waiting
+          function waitForWorker(worker: ServiceWorker) {
+            if (worker.state === 'activated') { cleanup(); resolve(reg); return; }
+            if (worker.state === 'redundant') {
+              cleanup();
+              reject(new Error('Service worker redundant — coba muat ulang halaman.'));
+              return;
+            }
+            function onChange() {
+              console.log('[SW] state:', worker.state);
+              if (worker.state === 'activated') { cleanup(); worker.removeEventListener('statechange', onChange); resolve(reg); }
+              else if (worker.state === 'redundant') { cleanup(); worker.removeEventListener('statechange', onChange); reject(new Error('Service worker redundant — coba muat ulang halaman.')); }
+            }
+            worker.addEventListener('statechange', onChange);
+          }
+
+          if (reg.installing) { waitForWorker(reg.installing); return; }
+          if (reg.waiting)    { waitForWorker(reg.waiting);    return; }
+
+          // Belum ada worker sama sekali — tunggu updatefound
+          reg.addEventListener('updatefound', () => {
+            if (reg.installing) waitForWorker(reg.installing);
+          });
+        })
+        .catch(err => { cleanup(); reject(err); });
+    });
+  }
+
   const enableNotifications = useCallback(async () => {
     if (notifLoading || !user) return;
+
+    const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
+    const isStandalone =
+      window.matchMedia('(display-mode: standalone)').matches ||
+      (navigator as any).standalone === true;
+
+    // Diagnostik awal
+    console.log('[Notif] platform:', {
+      isIOS,
+      isStandalone,
+      notificationApi: typeof Notification !== 'undefined',
+      pushManager: 'PushManager' in window,
+      serviceWorker: 'serviceWorker' in navigator,
+      permission: typeof Notification !== 'undefined' ? Notification.permission : 'n/a',
+    });
+
     if (typeof Notification === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
       setNotifPermission('unsupported');
+      toast({ variant: 'destructive', title: 'Browser tidak didukung', description: 'Gunakan Chrome/Edge Android atau Safari iOS 16.4+ dari Home Screen.' });
       return;
     }
-    // iOS: only allow from standalone (Home Screen) on iOS 16.4+
-    const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent);
-    const isStandalone = window.matchMedia('(display-mode: standalone)').matches || (navigator as any).standalone === true;
+
+    // iPhone: notifikasi hanya dari Home Screen (standalone)
     if (isIOS && !isStandalone) {
-      toast({ title: 'Buka dari Home Screen', description: 'Pasang EGS Attendance ke Home Screen terlebih dahulu, lalu buka dari sana untuk mengaktifkan notifikasi.' });
+      toast({
+        title: 'Buka dari Home Screen',
+        description: 'Pasang EGS Attendance ke layar utama iPhone terlebih dahulu, lalu buka dari sana untuk mengaktifkan notifikasi.',
+      });
       return;
     }
+
     setNotifLoading(true);
     try {
+      // 1. Izin notifikasi
+      console.log('[Notif] meminta izin…');
       const perm = await withTimeout(
         Promise.resolve(Notification.requestPermission()),
         20000,
         'izin notifikasi'
       );
+      console.log('[Notif] permission:', perm);
       setNotifPermission(perm as any);
+
       if (perm === 'denied') {
         toast({
           variant: 'destructive',
           title: 'Izin notifikasi ditolak',
           description: isIOS
-            ? 'Buka Pengaturan → EGS Attendance → Notifikasi, lalu aktifkan.'
+            ? 'Buka Pengaturan iPhone → EGS Attendance → Notifikasi, lalu aktifkan.'
             : 'Buka pengaturan browser → izinkan notifikasi untuk situs ini.',
         });
-        setNotifLoading(false); return;
+        return;
       }
-      if (perm !== 'granted') { setNotifLoading(false); return; }
+      if (perm !== 'granted') return;
 
-      const reg = await withTimeout(navigator.serviceWorker.ready, 10000, 'service worker');
-      const existing = await reg.pushManager.getSubscription();
+      // 2. Pastikan service worker aktif
+      console.log('[Notif] menunggu service worker…');
+      const reg = await withTimeout(registerAndWaitForSW(), 15000, 'aktivasi service worker');
+      console.log('[Notif] SW active, scope:', reg.scope, 'state:', reg.active?.state);
+
+      // 3. Ambil atau buat push subscription
       const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
       if (!vapidKey) throw new Error('VAPID public key tidak dikonfigurasi');
+
+      const existing = await reg.pushManager.getSubscription();
+      console.log('[Notif] existing subscription:', !!existing);
+
+      const applicationServerKey = urlBase64ToUint8Array(vapidKey).buffer as ArrayBuffer;
       const sub = existing || await withTimeout(
-        reg.pushManager.subscribe({
-          userVisibleOnly: true,
-          applicationServerKey: urlBase64ToUint8Array(vapidKey).buffer as ArrayBuffer,
-        }),
+        reg.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey }),
         15000,
         'push subscribe'
       );
+      console.log('[Notif] subscription endpoint:', sub.endpoint.slice(0, 60) + '…');
 
+      // 4. Kirim token ke server
       const { getAuth } = await import('firebase/auth');
       const idToken = await getAuth().currentUser?.getIdToken();
       if (!idToken) throw new Error('Sesi login tidak ditemukan. Silakan login ulang.');
+
+      const platform = isStandalone ? 'pwa' : 'browser';
+      console.log('[Notif] mengirim token ke server, platform:', platform);
 
       const res = await withTimeout(
         fetch('/api/attendance/notifications/subscribe', {
@@ -1137,7 +1225,7 @@ export default function AbsenPage() {
             employeeEmail: (user as any).email || null,
             brandId: user.brandId || null,
             siteId: activeSite?.id || null,
-            platform: (navigator as any).standalone || window.matchMedia('(display-mode: standalone)').matches ? 'pwa' : 'browser',
+            platform,
             userAgent: navigator.userAgent,
           }),
         }),
@@ -1145,10 +1233,13 @@ export default function AbsenPage() {
         'server subscribe'
       );
       const data = await res.json().catch(() => ({}));
+      console.log('[Notif] server response:', res.status, data);
+
       if (!res.ok || !data.success) {
         throw new Error(data.error || `Server error ${res.status}`);
       }
 
+      // 5. Simpan state hanya setelah token berhasil tersimpan di server
       setNotifSubscribed(true);
       toast({ title: 'Notifikasi Aktif', description: 'Anda akan mendapat pengingat sebelum jam masuk dan pulang.' });
     } catch (err: any) {
@@ -1163,7 +1254,7 @@ export default function AbsenPage() {
     if (!user) return;
     setNotifLoading(true);
     try {
-      const reg = await withTimeout(navigator.serviceWorker.ready, 10000, 'service worker');
+      const reg = await withTimeout(registerAndWaitForSW(), 15000, 'aktivasi service worker');
       const sub = await reg.pushManager.getSubscription();
       if (sub) await sub.unsubscribe();
 
