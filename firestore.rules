@@ -123,6 +123,29 @@ service cloud.firestore {
     }
 
 
+    // ── attendance_condition_reports ─────────────────────────────────────────
+    match /attendance_condition_reports/{reportId} {
+      // Staff: create laporan milik sendiri (uid + employeeUid harus sama dengan auth.uid)
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.employeeUid == request.auth.uid;
+
+      // Staff: baca laporan milik sendiri
+      allow get, list: if isSignedIn() && (isOwnDoc() || isPrivileged());
+
+      // HRD: boleh update hanya field review (reviewStatus, reviewNote, reviewedAt, reviewedByUid)
+      // Staff: tidak boleh mengubah field review
+      allow update: if isPrivileged()
+        || (isOwnDoc() && isSignedIn()
+            && !("reviewStatus"  in request.resource.data.diff(resource.data).affectedKeys())
+            && !("reviewNote"    in request.resource.data.diff(resource.data).affectedKeys())
+            && !("reviewedAt"    in request.resource.data.diff(resource.data).affectedKeys())
+            && !("reviewedByUid" in request.resource.data.diff(resource.data).affectedKeys()));
+
+      allow delete: if isPrivileged();
+    }
+
+
     // ── Push Notification Tokens ─────────────────────────────────────────────
     match /attendance_notification_tokens/{tokenId} {
       // User boleh create/read/update token miliknya sendiri

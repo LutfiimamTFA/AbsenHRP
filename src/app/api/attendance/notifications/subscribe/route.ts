@@ -13,18 +13,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'subscription dan uid wajib diisi' }, { status: 400 });
     }
 
-    // Verify uid via Firebase Admin Auth token
+    // Auth token WAJIB — jangan izinkan tanpa verifikasi
     const authHeader = req.headers.get('Authorization') || '';
     const token = authHeader.replace('Bearer ', '').trim();
-    if (token) {
-      try {
-        const decoded = await getAdminAuth().verifyIdToken(token);
-        if (decoded.uid !== uid) {
-          return NextResponse.json({ error: 'Unauthorized' }, { status: 403 });
-        }
-      } catch {
-        return NextResponse.json({ error: 'Token tidak valid' }, { status: 401 });
+    if (!token) {
+      return NextResponse.json({ error: 'Authorization token wajib disertakan' }, { status: 401 });
+    }
+    try {
+      const decoded = await getAdminAuth().verifyIdToken(token);
+      if (decoded.uid !== uid) {
+        return NextResponse.json({ error: 'uid tidak cocok dengan token' }, { status: 403 });
       }
+    } catch (authErr: any) {
+      return NextResponse.json({ error: 'Token tidak valid: ' + (authErr.message || '') }, { status: 401 });
     }
 
     const db = getAdminFirestore();
@@ -41,7 +42,7 @@ export async function POST(req: NextRequest) {
       employeeName: employeeName || null,
       employeeEmail: employeeEmail || null,
       brandId: brandId || null,
-      siteId: siteId || null,
+      siteId: siteId || null,         // boleh null — server resolve by brandId
       subscription,
       platform: platform || 'web',
       userAgent: userAgent || null,
@@ -54,16 +55,19 @@ export async function POST(req: NextRequest) {
       lastUsedAt: FieldValue.serverTimestamp(),
     };
 
+    let id: string;
     if (!existing.empty) {
       await existing.docs[0].ref.update(data);
-      return NextResponse.json({ success: true, action: 'updated', id: existing.docs[0].id });
+      id = existing.docs[0].id;
     } else {
       const ref = await db.collection('attendance_notification_tokens').add({
         ...data,
         createdAt: FieldValue.serverTimestamp(),
       });
-      return NextResponse.json({ success: true, action: 'created', id: ref.id });
+      id = ref.id;
     }
+
+    return NextResponse.json({ success: true, id });
   } catch (err: any) {
     console.error('[subscribe]', err);
     return NextResponse.json({ error: err.message || 'Internal error' }, { status: 500 });

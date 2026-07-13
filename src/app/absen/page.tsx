@@ -17,6 +17,9 @@ import {
   getDocs,
   getDoc,
   addDoc,
+  updateDoc,
+  writeBatch,
+  onSnapshot,
   serverTimestamp,
   Timestamp,
 } from "firebase/firestore";
@@ -299,24 +302,16 @@ export default function AbsenPage() {
   const [isIosBrowser, setIsIosBrowser]       = useState(false);
   const [showInstallGuide, setShowInstallGuide] = useState(false);
 
-  // History filters
-  const [historyFilterMode, setHistoryFilterMode] = useState<
-    "quick" | "custom" | "month"
-  >("quick");
-  const [selectedQuickFilter, setSelectedQuickFilter] = useState<
-    "today" | "week" | "month" | "year"
-  >("month");
-  const [customStartDate, setCustomStartDate] = useState(
-    () => new Date(Date.now() - 7 * 86400000).toISOString().split("T")[0],
+  // History filters — simplified: "today" or "pick" (single date)
+  const [historyMode, setHistoryMode] = useState<"today" | "pick">("today");
+  const [pickedDate, setPickedDate] = useState(
+    () => new Date().toISOString().split("T")[0],
   );
   const [customEndDate, setCustomEndDate] = useState(
     () => new Date().toISOString().split("T")[0],
   );
-  const [selectedMonth, setSelectedMonth] = useState(() =>
-    new Date().toISOString().slice(0, 7),
-  );
-  const [statusFilter, setStatusFilter] = useState("all");
-
+  // Logout loading state
+  const [logoutLoading, setLogoutLoading] = useState(false);
 
   // Photo modal state (selfie kehadiran)
   const [photoModal, setPhotoModal] = useState<{
@@ -385,7 +380,9 @@ export default function AbsenPage() {
     window.addEventListener('appinstalled', handleInstalled);
 
     if ('serviceWorker' in navigator) {
-      navigator.serviceWorker.register('/sw.js').catch(() => {});
+      navigator.serviceWorker.register('/sw.js').catch(err => {
+        console.error('[SW] Registration failed:', err);
+      });
     }
 
     return () => {
@@ -404,9 +401,10 @@ export default function AbsenPage() {
     setNotifPermission(perm);
     if (perm === 'granted') {
       // Cek apakah ada subscription aktif
-      navigator.serviceWorker.ready.then(reg => reg.pushManager.getSubscription()).then(sub => {
-        setNotifSubscribed(!!sub);
-      }).catch(() => {});
+      navigator.serviceWorker.ready
+        .then(reg => reg.pushManager.getSubscription())
+        .then(sub => setNotifSubscribed(!!sub))
+        .catch(err => console.error('[SW] getSubscription error:', err));
     }
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -448,19 +446,34 @@ export default function AbsenPage() {
     })();
   }, [db, user, userLoading, isAttendanceAllowed, toast]);
 
-  // ── Condition reports hari ini ─────────────────────────────────
+  // ── Condition reports hari ini — realtime onSnapshot ──────────
   useEffect(() => {
     if (!user?.uid || !isAttendanceAllowed) return;
     const todayStr = format(new Date(), "yyyy-MM-dd");
     setLoadingConditionReports(true);
-    getDocs(query(
+    const q = query(
       collection(db, "attendance_condition_reports"),
       where("uid", "==", user.uid),
       where("reportDate", "==", todayStr),
-    )).then(snap => {
-      setTodayConditionReports(snap.docs.map(d => ({ id: d.id, ...d.data() })));
-    }).catch(() => {}).finally(() => setLoadingConditionReports(false));
-  }, [db, user?.uid, isAttendanceAllowed]);
+    );
+    const unsub = onSnapshot(
+      q,
+      snap => {
+        setTodayConditionReports(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+        setLoadingConditionReports(false);
+      },
+      err => {
+        console.error("[attendance_condition_reports] onSnapshot error:", err);
+        toast({
+          variant: "destructive",
+          title: "Gagal memuat laporan kondisi",
+          description: err.message || "Cek koneksi dan coba refresh.",
+        });
+        setLoadingConditionReports(false);
+      },
+    );
+    return () => unsub();
+  }, [db, user?.uid, isAttendanceAllowed, toast]);
 
   // ── Live GPS watch ─────────────────────────────────────────────
   useEffect(() => {
@@ -604,46 +617,19 @@ export default function AbsenPage() {
   const nextAction: "IN" | "OUT" = todayStatus.hasIn ? "OUT" : "IN";
   const isFinished = todayStatus.hasOut;
 
-  // ── History filters ────────────────────────────────────────────
+  // ── History filters ─────────────────────────────────────────────
   const getDateRange = useCallback((): [Date, Date] => {
     const now = new Date();
-    let start: Date, end: Date;
-    if (historyFilterMode === "quick") {
-      end = new Date(now);
-      switch (selectedQuickFilter) {
-        case "today":
-          start = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-          break;
-        case "week":
-          start = new Date(now);
-          start.setDate(now.getDate() - now.getDay());
-          break;
-        case "year":
-          start = new Date(now.getFullYear(), 0, 1);
-          break;
-        default:
-          start = new Date(now.getFullYear(), now.getMonth(), 1);
-      }
-    } else if (historyFilterMode === "custom") {
-      start = customStartDate
-        ? new Date(customStartDate)
-        : new Date(now.getFullYear(), now.getMonth(), 1);
-      end = customEndDate ? new Date(customEndDate) : now;
+    let dateStr: string;
+    if (historyMode === "today") {
+      dateStr = format(now, "yyyy-MM-dd");
     } else {
-      const [y, m] = selectedMonth.split("-").map(Number);
-      start = new Date(y, m - 1, 1);
-      end = new Date(y, m, 0);
+      dateStr = pickedDate || format(now, "yyyy-MM-dd");
     }
-    start.setHours(0, 0, 0, 0);
-    end.setHours(23, 59, 59, 999);
+    const start = new Date(dateStr + "T00:00:00");
+    const end = new Date(dateStr + "T23:59:59.999");
     return [start, end];
-  }, [
-    historyFilterMode,
-    selectedQuickFilter,
-    customStartDate,
-    customEndDate,
-    selectedMonth,
-  ]);
+  }, [historyMode, pickedDate]);
 
   const [filterStart, filterEnd] = useMemo(
     () => getDateRange(),
@@ -700,7 +686,7 @@ export default function AbsenPage() {
     [sortedEvents, filterStart, filterEnd, getEventDate],
   );
 
-  // Group history by date — statusFilter diapply setelah group
+  // Group history by date
   const groupedHistory = useMemo(() => {
     const groups = new Map<string, any[]>();
     filteredEvents.forEach((ev: any) => {
@@ -757,21 +743,7 @@ export default function AbsenPage() {
       });
   }, [filteredEvents, getEventDate, getEventTime]);
 
-  // Apply statusFilter pada grouped history
-  const filteredGroups = useMemo(() => {
-    if (statusFilter === "all") return groupedHistory;
-    return groupedHistory.filter(({ checkIn, checkOut, dailyStatus }) => {
-      switch (statusFilter) {
-        case "COMPLETE":     return dailyStatus === "COMPLETE";
-        case "LATE":         return checkIn?.status === "LATE";
-        case "EARLY_LEAVE":  return checkOut?.status === "EARLY_LEAVE";
-        // Hanya tampilkan tanggal lampau — hari ini yang belum pulang bukan "lupa"
-        case "MISSING_OUT":  return dailyStatus === "MISSING_OUT";
-        case "MISSING_IN":   return dailyStatus === "MISSING_IN";
-        default:             return true;
-      }
-    });
-  }, [groupedHistory, statusFilter]);
+  const filteredGroups = groupedHistory;
 
   // Ringkasan statistik periode filter
   const historySummary = useMemo(() => {
@@ -1051,6 +1023,13 @@ export default function AbsenPage() {
   }, [isInstalled, deferredPrompt, toast]);
 
   // ── Push Notification: subscribe ─────────────────────────────
+  function urlBase64ToUint8Array(base64String: string): Uint8Array {
+    const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
+    const base64 = (base64String + padding).replace(/-/g, '+').replace(/_/g, '/');
+    const raw = atob(base64);
+    return Uint8Array.from([...raw].map(c => c.charCodeAt(0)));
+  }
+
   const enableNotifications = useCallback(async () => {
     if (notifLoading || !user) return;
     if (typeof Notification === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
@@ -1065,33 +1044,40 @@ export default function AbsenPage() {
 
       const reg = await navigator.serviceWorker.ready;
       const existing = await reg.pushManager.getSubscription();
+      const vapidKey = process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY;
+      if (!vapidKey) throw new Error('VAPID public key tidak dikonfigurasi');
       const sub = existing || await reg.pushManager.subscribe({
         userVisibleOnly: true,
-        applicationServerKey: process.env.NEXT_PUBLIC_VAPID_PUBLIC_KEY!,
+        applicationServerKey: urlBase64ToUint8Array(vapidKey).buffer as ArrayBuffer,
       });
 
-      const idToken = await (await import('firebase/auth')).getAuth().currentUser?.getIdToken();
-      await fetch('/api/attendance/notifications/subscribe', {
+      const { getAuth } = await import('firebase/auth');
+      const idToken = await getAuth().currentUser?.getIdToken();
+      if (!idToken) throw new Error('Sesi login tidak ditemukan. Silakan login ulang.');
+
+      const res = await fetch('/api/attendance/notifications/subscribe', {
         method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-        },
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
         body: JSON.stringify({
           subscription: sub.toJSON(),
           uid: user.uid,
           employeeName: user.displayName || null,
-          employeeEmail: user.email || null,
+          employeeEmail: (user as any).email || null,
           brandId: user.brandId || null,
           siteId: activeSite?.id || null,
           platform: (navigator as any).standalone || window.matchMedia('(display-mode: standalone)').matches ? 'pwa' : 'browser',
           userAgent: navigator.userAgent,
         }),
       });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) {
+        throw new Error(data.error || `Server error ${res.status}`);
+      }
 
       setNotifSubscribed(true);
       toast({ title: 'Notifikasi Aktif', description: 'Anda akan mendapat pengingat sebelum jam masuk dan pulang.' });
     } catch (err: any) {
+      console.error('[enableNotifications]', err);
       toast({ variant: 'destructive', title: 'Gagal mengaktifkan notifikasi', description: err.message || 'Coba lagi.' });
     } finally {
       setNotifLoading(false);
@@ -1106,20 +1092,43 @@ export default function AbsenPage() {
       const sub = await reg.pushManager.getSubscription();
       if (sub) await sub.unsubscribe();
 
-      const idToken = await (await import('firebase/auth')).getAuth().currentUser?.getIdToken();
-      await fetch('/api/attendance/notifications/unsubscribe', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          ...(idToken ? { Authorization: `Bearer ${idToken}` } : {}),
-        },
-        body: JSON.stringify({ uid: user.uid }),
-      });
+      const { getAuth } = await import('firebase/auth');
+      const idToken = await getAuth().currentUser?.getIdToken();
+      if (idToken) {
+        await fetch('/api/attendance/notifications/unsubscribe', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+          body: JSON.stringify({ uid: user.uid }),
+        });
+      }
 
       setNotifSubscribed(false);
       toast({ title: 'Notifikasi Dinonaktifkan', description: 'Anda tidak akan menerima pengingat absen.' });
     } catch (err: any) {
+      console.error('[disableNotifications]', err);
       toast({ variant: 'destructive', title: 'Gagal menonaktifkan', description: err.message || 'Coba lagi.' });
+    } finally {
+      setNotifLoading(false);
+    }
+  }, [user, toast]);
+
+  const sendTestNotification = useCallback(async () => {
+    if (!user) return;
+    setNotifLoading(true);
+    try {
+      const { getAuth } = await import('firebase/auth');
+      const idToken = await getAuth().currentUser?.getIdToken();
+      if (!idToken) throw new Error('Sesi tidak ditemukan');
+      const res = await fetch('/api/attendance/notifications/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${idToken}` },
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || !data.success) throw new Error(data.error || `Server error ${res.status}`);
+      toast({ title: 'Notifikasi Tes Terkirim', description: 'Periksa notifikasi di HP Anda.' });
+    } catch (err: any) {
+      console.error('[sendTestNotification]', err);
+      toast({ variant: 'destructive', title: 'Tes gagal', description: err.message || 'Coba lagi.' });
     } finally {
       setNotifLoading(false);
     }
@@ -1253,6 +1262,7 @@ export default function AbsenPage() {
 
       const report = cleanUndefined({
         uid: user.uid,
+        employeeUid: user.uid,
         employeeName: user.displayName || null,
         employeeId: user.employeeId || null,
         brandId: user.brandId || null,
@@ -1264,6 +1274,9 @@ export default function AbsenPage() {
         reasonKey: conditionReason,
         reasonLabel: conditionReason,
         note: conditionNote.trim(),
+        specialCondition: conditionReason,
+        conditionCategory: conditionType === 'check_in' ? 'kendala_masuk' : 'kondisi_pulang',
+        conditionNote: conditionNote.trim(),
         conditionProofPhotoUrl: proofPhotoUrl,
         proofPhotoUrl,
         conditionProofType: 'reason_proof',
@@ -1275,6 +1288,7 @@ export default function AbsenPage() {
         address: addressStr,
         status: 'pending_review',
         linkedAttendanceId: null,
+        linkedAt: null,
         reviewedByUid: null,
         reviewedAt: null,
         reviewStatus: 'pending',
@@ -1282,13 +1296,13 @@ export default function AbsenPage() {
         reportedAt: now.toISOString(),
       });
 
+      // onSnapshot handles state update; we only need the doc ID for local optimistic update
       const docRef = await addDoc(collection(db, "attendance_condition_reports"), {
         ...report,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
       });
-
-      setTodayConditionReports(prev => [...prev, { id: docRef.id, ...report }]);
+      void docRef; // ID available if needed for linking
       cancelConditionReport();
       const typeLabel = conditionType === 'check_in' ? 'masuk' : 'pulang';
       toast({ title: 'Laporan terkirim', description: `Kondisi ${typeLabel} telah dilaporkan ke HRD untuk direview.` });
@@ -1320,6 +1334,12 @@ export default function AbsenPage() {
       const { status, lateMinutes, scheduledCheckIn, allowedCheckInTime } = calculateStatus(tapType, now, activeSite);
       const locationStatus = tapGps?.locationStatus ?? (tapGps?.insideRadius === false ? 'outside_radius' : 'inside_radius');
       const needsHrdReview = locationStatus !== 'inside_radius';
+      const allowedRadius = activeSite?.radiusM ?? 150;
+      const distanceFromSite = gps?.distanceToSiteM ?? null;
+      const isOutsideRadius = distanceFromSite !== null ? distanceFromSite > allowedRadius : false;
+      const outsideRadiusNote = isOutsideRadius
+        ? `Absensi dilakukan di luar radius kantor. Jarak terdeteksi ${Math.round(distanceFromSite!)} meter dari batas ${allowedRadius} meter.`
+        : null;
 
       let driveFileId: string | null = null;
       let driveViewUrl: string | null = null;
@@ -1473,11 +1493,28 @@ export default function AbsenPage() {
         gpsAccuracy: gps?.accuracyM ?? null,
         locationConfidence: gps?.locationConfidence ?? null,
         effectiveRadius: activeSite ? (activeSite.radiusM || 150) + (gps?.accuracyM ?? 0) : null,
-        // Link ke laporan kondisi sesuai tipe absen
+        allowedRadius,
+        isOutsideRadius,
+        outsideRadiusNote,
+        latitude: gps?.lat ?? null,
+        longitude: gps?.lng ?? null,
+        locationAddress: addr?.displayName || null,
+        // Brand + date canonical key (baca oleh HRP)
+        brandId: user.brandId || null,
+        dateKey: format(now, "yyyy-MM-dd"),
+        // Condition report links
         ...(tapType === 'IN' ? {
           checkInConditionReportId: todayConditionReports.find(r => r.reportType === 'check_in')?.id || null,
+          specialCondition: todayConditionReports.find(r => r.reportType === 'check_in')?.specialCondition || null,
+          conditionNote: todayConditionReports.find(r => r.reportType === 'check_in')?.conditionNote || null,
+          conditionCategory: todayConditionReports.find(r => r.reportType === 'check_in')?.conditionCategory || null,
+          conditionReasonLabel: todayConditionReports.find(r => r.reportType === 'check_in')?.reasonLabel || null,
         } : {
           checkOutConditionReportId: todayConditionReports.find(r => r.reportType === 'check_out')?.id || null,
+          specialCondition: todayConditionReports.find(r => r.reportType === 'check_out')?.specialCondition || null,
+          conditionNote: todayConditionReports.find(r => r.reportType === 'check_out')?.conditionNote || null,
+          conditionCategory: todayConditionReports.find(r => r.reportType === 'check_out')?.conditionCategory || null,
+          conditionReasonLabel: todayConditionReports.find(r => r.reportType === 'check_out')?.reasonLabel || null,
         }),
         linkedConditionReportIds: todayConditionReports.map(r => r.id),
         hasConditionReport: todayConditionReports.length > 0,
@@ -1532,7 +1569,25 @@ export default function AbsenPage() {
         updatedAt: serverTimestamp(),
       };
 
-      await addDoc(collection(db, "attendance_events"), payload);
+      // Buat eventRef lebih dulu agar bisa dipakai untuk linking
+      const eventRef = doc(collection(db, "attendance_events"));
+      const batch = writeBatch(db);
+      batch.set(eventRef, payload);
+
+      // Update linkedAttendanceId pada condition report yang terkait
+      const linkedReport = tapType === 'IN'
+        ? todayConditionReports.find(r => r.reportType === 'check_in')
+        : todayConditionReports.find(r => r.reportType === 'check_out');
+      if (linkedReport?.id) {
+        const reportRef = doc(db, "attendance_condition_reports", linkedReport.id);
+        batch.update(reportRef, {
+          linkedAttendanceId: eventRef.id,
+          linkedAt: serverTimestamp(),
+          updatedAt: serverTimestamp(),
+        });
+      }
+
+      await batch.commit();
       setTapStep("success");
     } catch (err: any) {
       console.error("Submit error:", err);
@@ -1595,6 +1650,21 @@ export default function AbsenPage() {
     return { startTime, endTime, graceLateMinutes, radiusM, allowedCheckInTime };
   }, [activeSite]);
 
+  // ─── Logout ────────────────────────────────────────────────────
+  const handleLogout = useCallback(async () => {
+    if (logoutLoading) return;
+    setLogoutLoading(true);
+    try {
+      await signOut(auth);
+      router.push("/login");
+    } catch (err: any) {
+      console.error("[AbsenHRP] logout error:", err);
+      toast({ variant: "destructive", title: "Gagal keluar", description: err?.message || "Coba lagi." });
+    } finally {
+      setLogoutLoading(false);
+    }
+  }, [logoutLoading, auth, router, toast]);
+
   // ─── Loading guard ─────────────────────────────────────────────
   if (userLoading || (loadingSites && isAttendanceAllowed)) {
     return (
@@ -1653,29 +1723,35 @@ export default function AbsenPage() {
               Web Absen
             </Badge>
             <div className="flex items-center gap-1.5">
-              {/* Tombol Unduh Aplikasi — selalu muncul di header, kecuali saat flow aktif */}
-              {!showCancel && !isInstalled && (
-                <button
-                  onClick={handleInstallApp}
-                  className={`flex items-center gap-1 px-2.5 py-1 rounded-full text-[9px] font-bold border active:opacity-75 ${
-                    canInstallApp
-                      ? 'bg-primary text-white border-primary'
-                      : 'bg-teal-100 text-teal-800 border-teal-200'
-                  }`}
-                >
-                  📲 {canInstallApp ? 'Install Aplikasi' : 'Unduh Aplikasi'}
-                </button>
-              )}
               {!showCancel && isInstalled && (
                 <span className="text-[9px] text-green-700 font-bold px-2">✓ App terpasang</span>
               )}
               {showCancel ? (
-                <Button variant="ghost" size="icon" onClick={cancelTap} className="rounded-full w-9 h-9 text-muted-foreground">
-                  <X className="w-4 h-4" />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={cancelTap}
+                  aria-label="Batal"
+                  title="Batal"
+                  className="rounded-full w-10 h-10 text-muted-foreground hover:text-foreground hover:bg-muted focus-visible:ring-2"
+                >
+                  <X className="w-4 h-4" aria-hidden="true" />
                 </Button>
               ) : (
-                <Button variant="ghost" size="icon" onClick={() => signOut(auth)} className="rounded-full w-9 h-9">
-                  <LogOut className="w-4 h-4" />
+                <Button
+                  type="button"
+                  variant="ghost"
+                  size="icon"
+                  onClick={handleLogout}
+                  disabled={logoutLoading}
+                  aria-label="Keluar dari aplikasi"
+                  title="Keluar"
+                  className="rounded-full w-10 h-10 text-muted-foreground hover:text-destructive hover:bg-destructive/10 focus-visible:ring-2 disabled:opacity-50"
+                >
+                  {logoutLoading
+                    ? <Loader2 className="w-4 h-4 animate-spin" aria-hidden="true" />
+                    : <LogOut className="w-4 h-4" aria-hidden="true" />}
                 </Button>
               )}
             </div>
@@ -1744,37 +1820,58 @@ export default function AbsenPage() {
             </div>
 
             {/* Lokasi terdeteksi */}
-            <div className={`rounded-2xl border shadow-sm p-4 space-y-2 ${tapGps?.locationStatus === 'inside_radius' ? 'bg-emerald-50 border-emerald-200' : 'bg-white'}`}>
-              <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest">
-                Lokasi Terdeteksi
-              </p>
-              {tapAddress ? (
-                <p className="text-[13px] font-semibold text-foreground leading-snug">
-                  {[tapAddress.road, tapAddress.kecamatan, tapAddress.kabupatenKota, tapAddress.province]
-                    .filter(Boolean).join(', ') || tapAddress.displayName}
-                </p>
-              ) : tapGps ? (
-                <p className="text-[11px] text-muted-foreground italic flex items-center gap-1">
-                  <Loader2 className="w-3 h-3 animate-spin" /> Memuat alamat…
-                </p>
-              ) : (
-                <p className="text-[11px] text-muted-foreground italic">Alamat belum terbaca. Lokasi tetap tersimpan untuk review HRD.</p>
-              )}
-              {/* Status sederhana */}
-              {tapGps && (
-                <p className={`text-[11px] font-bold ${tapGps.locationStatus === 'inside_radius' ? 'text-emerald-700' : 'text-amber-700'}`}>
-                  {tapGps.locationStatus === 'inside_radius'
-                    ? '✓ Lokasi terbaca'
-                    : 'Lokasi akan ditinjau HRD jika diperlukan.'}
-                </p>
-              )}
-              {/* Tombol ambil ulang jika GPS kurang presisi */}
-              {tapGps && (tapGps.locationStatus === 'gps_uncertain' || tapGps.locationStatus === 'gps_low_accuracy') && (
-                <Button variant="outline" onClick={retakeLocation} className="w-full h-9 rounded-xl text-[11px] font-bold gap-1.5 mt-1">
-                  <Navigation className="w-3.5 h-3.5" /> Ambil Ulang Lokasi
-                </Button>
-              )}
-            </div>
+            {(() => {
+              const insideRadius = tapGps?.locationStatus === 'inside_radius';
+              const outsideRadius = tapGps?.locationStatus === 'outside_radius';
+              const distM = tapGps?.distanceToSiteM ?? null;
+              const radiusM = activeSite?.radiusM ?? 150;
+              return (
+                <div className={`rounded-2xl border shadow-sm p-4 space-y-2 ${insideRadius ? 'bg-emerald-50 border-emerald-200' : outsideRadius ? 'bg-amber-50 border-amber-200' : 'bg-white'}`}>
+                  <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest">
+                    Lokasi Terdeteksi
+                  </p>
+                  {tapAddress ? (
+                    <p className="text-[13px] font-semibold text-foreground leading-snug">
+                      {[tapAddress.road, tapAddress.kecamatan, tapAddress.kabupatenKota, tapAddress.province]
+                        .filter(Boolean).join(', ') || tapAddress.displayName}
+                    </p>
+                  ) : tapGps ? (
+                    <p className="text-[11px] text-muted-foreground italic flex items-center gap-1">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Memuat alamat…
+                    </p>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground italic">Alamat belum terbaca. Lokasi tetap tersimpan untuk review HRD.</p>
+                  )}
+                  {/* Status radius */}
+                  {tapGps && (
+                    insideRadius ? (
+                      <div className="space-y-0.5">
+                        <p className="text-[11px] font-bold text-emerald-700">✓ Anda berada di area kantor</p>
+                        {distM !== null && (
+                          <p className="text-[10px] text-emerald-600">Jarak sekitar {Math.round(distM)} m dari titik absensi</p>
+                        )}
+                      </div>
+                    ) : outsideRadius ? (
+                      <div className="space-y-1">
+                        <p className="text-[11px] font-bold text-amber-700">⚠ Anda berada di luar radius kantor</p>
+                        {distM !== null && (
+                          <p className="text-[10px] text-amber-600">Jarak terdeteksi {Math.round(distM)} m (radius kantor {radiusM} m)</p>
+                        )}
+                        <p className="text-[10px] text-amber-700 leading-snug">Anda tetap dapat melakukan absensi. Lokasi dan jarak ini akan dicatat dan dapat ditinjau oleh HRD.</p>
+                      </div>
+                    ) : (
+                      <p className="text-[11px] font-bold text-amber-700">Lokasi akan ditinjau HRD jika diperlukan.</p>
+                    )
+                  )}
+                  {/* Tombol ambil ulang jika GPS kurang presisi */}
+                  {tapGps && (tapGps.locationStatus === 'gps_uncertain' || tapGps.locationStatus === 'gps_low_accuracy') && (
+                    <Button variant="outline" onClick={retakeLocation} className="w-full h-9 rounded-xl text-[11px] font-bold gap-1.5 mt-1">
+                      <Navigation className="w-3.5 h-3.5" /> Ambil Ulang Lokasi
+                    </Button>
+                  )}
+                </div>
+              );
+            })()}
           </div>
 
           <div className="px-4 space-y-2">
@@ -2267,7 +2364,7 @@ export default function AbsenPage() {
   // ─── Main UI (idle) ────────────────────────────────────────────
   return (
     <div className="min-h-svh bg-background flex flex-col max-w-md mx-auto shadow-2xl border-x">
-      <div className="flex-1 overflow-auto pb-6">
+      <div className="flex-1 overflow-auto pb-24">
         {renderHeader()}
 
         <Tabs defaultValue="absen" className="w-full">
@@ -2423,44 +2520,94 @@ export default function AbsenPage() {
             )}
 
             {/* ── Status Lokasi Realtime ──────────────────────────── */}
-            {isAttendanceAllowed && (
-              <div className={`rounded-2xl border shadow-sm p-4 ${
-                liveLocationEval?.locationStatus === 'inside_radius' ? 'bg-emerald-50 border-emerald-200' : 'bg-white'
-              }`}>
-                <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest mb-2 flex items-center gap-1.5">
-                  <MapPin className="w-3 h-3" /> Lokasi Anda Sekarang
-                </p>
-                {liveLocation ? (
-                  <div className="space-y-1.5">
-                    {/* Alamat */}
-                    {liveAddress ? (
-                      <p className="text-[12px] font-semibold text-foreground leading-snug">
-                        {[liveAddress.road, liveAddress.kecamatan, liveAddress.kabupatenKota, liveAddress.province]
-                          .filter(Boolean).join(', ') || liveAddress.displayName}
-                      </p>
-                    ) : (
-                      <p className="text-[11px] text-muted-foreground italic flex items-center gap-1">
-                        <Loader2 className="w-3 h-3 animate-spin" /> Memuat alamat…
-                      </p>
-                    )}
-                    {/* Status sederhana */}
-                    {liveLocationEval ? (
-                      <p className={`text-[11px] font-bold ${liveLocationEval.locationStatus === 'inside_radius' ? 'text-emerald-700' : 'text-muted-foreground'}`}>
-                        {liveLocationEval.locationStatus === 'inside_radius'
-                          ? '✓ Lokasi terbaca'
-                          : 'Lokasi akan ditinjau HRD jika diperlukan.'}
-                      </p>
-                    ) : (
-                      <p className="text-[11px] text-muted-foreground">Mendeteksi kantor terdekat…</p>
-                    )}
-                  </div>
-                ) : (
-                  <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
-                    <Loader2 className="w-3 h-3 animate-spin" /> Mendeteksi lokasi…
+            {isAttendanceAllowed && (() => {
+              const liveInside = liveLocationEval?.locationStatus === 'inside_radius';
+              const liveOutside = liveLocationEval?.locationStatus === 'outside_radius';
+              const liveDistM = liveDistanceToSite;
+              const liveRadiusM = activeSite?.radiusM ?? 150;
+              const liveAccuracy = liveLocation?.accuracy ?? null;
+              return (
+                <div className={`rounded-2xl border shadow-sm p-4 ${
+                  liveInside ? 'bg-emerald-50 border-emerald-200' : liveOutside ? 'bg-amber-50 border-amber-200' : 'bg-white'
+                }`}>
+                  <p className="text-[8px] font-black text-muted-foreground uppercase tracking-widest mb-2 flex items-center gap-1.5">
+                    <MapPin className="w-3 h-3" /> Lokasi Anda Sekarang
                   </p>
-                )}
-              </div>
-            )}
+                  {liveLocation ? (
+                    <div className="space-y-2">
+                      {/* Alamat */}
+                      {liveAddress ? (
+                        <p className="text-[12px] font-semibold text-foreground leading-snug">
+                          {[liveAddress.road, liveAddress.kecamatan, liveAddress.kabupatenKota, liveAddress.province]
+                            .filter(Boolean).join(', ') || liveAddress.displayName}
+                        </p>
+                      ) : (
+                        <p className="text-[11px] text-muted-foreground italic flex items-center gap-1">
+                          <Loader2 className="w-3 h-3 animate-spin" /> Memuat alamat…
+                        </p>
+                      )}
+
+                      {/* Status radius */}
+                      {liveLocationEval ? (
+                        liveInside ? (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-1.5">
+                              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-700">
+                                <span className="text-base leading-none">✓</span> Anda berada dalam radius kantor
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="bg-emerald-100/60 rounded-xl px-3 py-2">
+                                <p className="text-[8px] text-emerald-600 font-bold uppercase">Jarak Anda</p>
+                                <p className="text-sm font-black text-emerald-800 tabular-nums">{liveDistM !== null ? `${Math.round(liveDistM)} m` : '— m'}</p>
+                              </div>
+                              <div className="bg-emerald-100/60 rounded-xl px-3 py-2">
+                                <p className="text-[8px] text-emerald-600 font-bold uppercase">Batas Radius</p>
+                                <p className="text-sm font-black text-emerald-800 tabular-nums">{liveRadiusM} m</p>
+                              </div>
+                            </div>
+                            <p className="text-[10px] text-emerald-700">Lokasi Anda sesuai area absensi kantor.</p>
+                            {liveAccuracy !== null && (
+                              <p className="text-[9px] text-emerald-600/70">Akurasi GPS: ±{Math.round(liveAccuracy)} m</p>
+                            )}
+                          </div>
+                        ) : liveOutside ? (
+                          <div className="space-y-2">
+                            <div className="flex items-center gap-1.5">
+                              <span className="inline-flex items-center gap-1 text-[11px] font-bold text-amber-700">
+                                <span className="text-base leading-none">⚠</span> Anda berada di luar radius kantor
+                              </span>
+                            </div>
+                            <div className="grid grid-cols-2 gap-2">
+                              <div className="bg-amber-100/60 rounded-xl px-3 py-2">
+                                <p className="text-[8px] text-amber-600 font-bold uppercase">Jarak Anda</p>
+                                <p className="text-sm font-black text-amber-800 tabular-nums">{liveDistM !== null ? `${Math.round(liveDistM)} m` : '— m'}</p>
+                              </div>
+                              <div className="bg-amber-100/60 rounded-xl px-3 py-2">
+                                <p className="text-[8px] text-amber-600 font-bold uppercase">Batas Radius</p>
+                                <p className="text-sm font-black text-amber-800 tabular-nums">{liveRadiusM} m</p>
+                              </div>
+                            </div>
+                            <p className="text-[10px] text-amber-700 leading-snug">Anda tetap dapat melakukan absensi, tetapi data lokasi ini akan dicatat untuk ditinjau oleh HRD.</p>
+                            {liveAccuracy !== null && (
+                              <p className="text-[9px] text-amber-600/70">Akurasi GPS: ±{Math.round(liveAccuracy)} m</p>
+                            )}
+                          </div>
+                        ) : (
+                          <p className="text-[11px] text-muted-foreground">Mendeteksi jarak ke kantor…</p>
+                        )
+                      ) : (
+                        <p className="text-[11px] text-muted-foreground">Mendeteksi kantor terdekat…</p>
+                      )}
+                    </div>
+                  ) : (
+                    <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
+                      <Loader2 className="w-3 h-3 animate-spin" /> Mendeteksi lokasi…
+                    </p>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* ── Card: Kondisi Khusus Hari Ini ─────────────────── */}
             {isAttendanceAllowed && (() => {
@@ -2551,7 +2698,7 @@ export default function AbsenPage() {
                         <Button
                           variant="outline"
                           onClick={() => startConditionReport('check_in')}
-                          className="w-full h-10 rounded-xl text-[11px] font-black gap-1.5 border-amber-300 text-amber-700 hover:bg-amber-50"
+                          className="w-full h-10 rounded-xl text-[11px] font-black gap-1.5 border-amber-300 text-amber-700 hover:bg-amber-100 hover:text-amber-800 hover:border-amber-400"
                         >
                           <ShieldAlert className="w-3.5 h-3.5" /> Lapor Kondisi Masuk
                         </Button>
@@ -2610,7 +2757,7 @@ export default function AbsenPage() {
                         <Button
                           variant="outline"
                           onClick={() => startConditionReport('check_out')}
-                          className="w-full h-10 rounded-xl text-[11px] font-black gap-1.5 border-blue-300 text-blue-700 hover:bg-blue-50"
+                          className="w-full h-10 rounded-xl text-[11px] font-black gap-1.5 border-blue-300 text-blue-700 hover:bg-blue-100 hover:text-blue-800 hover:border-blue-400"
                         >
                           <ShieldAlert className="w-3.5 h-3.5" /> Lapor Kondisi Pulang
                         </Button>
@@ -2691,15 +2838,24 @@ export default function AbsenPage() {
                           <p className="text-[11px] font-bold text-green-700">Notifikasi Aktif</p>
                         </div>
                         <p className="text-[9px] text-muted-foreground leading-snug">
-                          Anda akan mendapat pengingat {activeSite?.shift?.startTime ? `15 menit sebelum jam masuk (${activeSite.shift.startTime} WIB)` : 'sebelum jam masuk'} dan {activeSite?.shift?.endTime ? `sebelum jam pulang (${activeSite.shift.endTime} WIB)` : 'sebelum jam pulang'}.
+                          Pengingat masuk {activeSite?.shift?.startTime ? `pukul ${activeSite.shift.startTime}` : ''} dan pulang {activeSite?.shift?.endTime ? `pukul ${activeSite.shift.endTime}` : ''} — dikirim 15 menit sebelumnya.
                         </p>
-                        <button
-                          onClick={disableNotifications}
-                          disabled={notifLoading}
-                          className="text-[9px] text-muted-foreground underline underline-offset-2 hover:text-slate-700"
-                        >
-                          {notifLoading ? 'Memproses…' : 'Nonaktifkan notifikasi'}
-                        </button>
+                        <div className="flex gap-3">
+                          <button
+                            onClick={sendTestNotification}
+                            disabled={notifLoading}
+                            className="text-[9px] text-primary font-bold underline underline-offset-2 hover:text-primary/70 disabled:opacity-50"
+                          >
+                            {notifLoading ? 'Mengirim…' : 'Kirim notifikasi tes'}
+                          </button>
+                          <button
+                            onClick={disableNotifications}
+                            disabled={notifLoading}
+                            className="text-[9px] text-muted-foreground underline underline-offset-2 hover:text-slate-700 disabled:opacity-50"
+                          >
+                            Nonaktifkan
+                          </button>
+                        </div>
                       </div>
                     ) : (
                       <div className="space-y-3">
@@ -2717,7 +2873,7 @@ export default function AbsenPage() {
                           onClick={enableNotifications}
                           disabled={notifLoading || iOSNeedsInstall}
                           variant="outline"
-                          className="w-full h-10 rounded-xl text-[11px] font-black gap-1.5 border-slate-300 text-slate-700 hover:bg-slate-50"
+                          className="w-full h-10 rounded-xl text-[11px] font-black gap-1.5 border-slate-300 text-slate-700 hover:bg-slate-100 hover:text-slate-800 hover:border-slate-400"
                         >
                           {notifLoading
                             ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Mengaktifkan…</>
@@ -2860,81 +3016,33 @@ export default function AbsenPage() {
               </div>
             ) : (
               <>
-                {/* Filters */}
-                <div className="bg-white rounded-2xl border shadow-sm p-3 space-y-2">
-                  {/* Period mode tabs */}
-                  <div className="flex items-center gap-1 p-0.5 bg-muted/40 rounded-xl">
-                    {(["quick", "custom", "month"] as const).map((m) => (
+                {/* Filters — Hari Ini / Pilih Tanggal */}
+                <div className="bg-white rounded-2xl border shadow-sm p-3 space-y-2.5">
+                  <div className="flex gap-2">
+                    {(["today", "pick"] as const).map((m) => (
                       <button
                         key={m}
-                        onClick={() => setHistoryFilterMode(m)}
-                        className={`flex-1 text-[8px] font-bold h-6 rounded-[9px] transition-colors ${
-                          historyFilterMode === m
-                            ? "bg-white shadow-sm text-foreground"
-                            : "text-muted-foreground"
+                        type="button"
+                        onClick={() => setHistoryMode(m)}
+                        className={`flex-1 h-9 rounded-xl text-[11px] font-bold transition-colors border ${
+                          historyMode === m
+                            ? "bg-primary text-white border-primary"
+                            : "text-foreground border-muted bg-muted/30 hover:bg-muted/60"
                         }`}
                       >
-                        {m === "quick" ? "Cepat" : m === "custom" ? "Rentang" : "Bulan"}
+                        {m === "today" ? "Hari Ini" : "Pilih Tanggal"}
                       </button>
                     ))}
                   </div>
-
-                  {historyFilterMode === "quick" && (
-                    <div className="flex gap-1">
-                      {(["today", "week", "month", "year"] as const).map((f) => (
-                        <button
-                          key={f}
-                          onClick={() => setSelectedQuickFilter(f)}
-                          className={`flex-1 text-[8px] font-bold h-6 rounded-lg transition-colors ${
-                            selectedQuickFilter === f
-                              ? "bg-primary/10 text-primary border border-primary/25"
-                              : "text-muted-foreground border border-transparent"
-                          }`}
-                        >
-                          {f === "today" ? "Hari ini" : f === "week" ? "Minggu" : f === "month" ? "Bulan" : "Tahun"}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                  {historyFilterMode === "custom" && (
-                    <div className="flex items-center gap-1.5">
-                      <input
-                        type="date"
-                        value={customStartDate}
-                        onChange={(e) => setCustomStartDate(e.target.value)}
-                        className="flex-1 text-[9px] h-7 px-2 rounded-lg border bg-white"
-                      />
-                      <span className="text-[8px] text-muted-foreground shrink-0">–</span>
-                      <input
-                        type="date"
-                        value={customEndDate}
-                        onChange={(e) => setCustomEndDate(e.target.value)}
-                        className="flex-1 text-[9px] h-7 px-2 rounded-lg border bg-white"
-                      />
-                    </div>
-                  )}
-                  {historyFilterMode === "month" && (
+                  {historyMode === "pick" && (
                     <input
-                      type="month"
-                      value={selectedMonth}
-                      onChange={(e) => setSelectedMonth(e.target.value)}
-                      className="text-[9px] h-7 px-2 rounded-lg border bg-white w-full"
+                      type="date"
+                      value={pickedDate}
+                      max={format(new Date(), "yyyy-MM-dd")}
+                      onChange={(e) => setPickedDate(e.target.value)}
+                      className="w-full text-[11px] h-9 px-3 rounded-xl border bg-white text-foreground focus:outline-none focus:ring-2 focus:ring-primary/30"
                     />
                   )}
-
-                  {/* Status filter */}
-                  <select
-                    value={statusFilter}
-                    onChange={(e) => setStatusFilter(e.target.value)}
-                    className="w-full text-[9px] h-7 px-2 rounded-lg border bg-white text-muted-foreground"
-                  >
-                    <option value="all">Semua status</option>
-                    <option value="COMPLETE">Lengkap (masuk + pulang)</option>
-                    <option value="LATE">Terlambat masuk</option>
-                    <option value="EARLY_LEAVE">Pulang awal</option>
-                    <option value="MISSING_OUT">Lupa absen pulang</option>
-                    <option value="MISSING_IN">Lupa absen masuk</option>
-                  </select>
                 </div>
 
                 {eventsLoading ? (
@@ -2948,54 +3056,41 @@ export default function AbsenPage() {
                     ))}
                   </div>
                 ) : groupedHistory.length === 0 ? (
-                  <div className="py-10 flex flex-col items-center gap-3 opacity-40">
-                    <FileText className="w-8 h-8 text-muted-foreground" />
-                    <p className="text-xs italic text-muted-foreground text-center">
-                      Tidak ada riwayat pada periode ini.
-                    </p>
+                  <div className="py-12 flex flex-col items-center gap-3 text-center">
+                    <div className="w-14 h-14 rounded-2xl bg-muted/40 flex items-center justify-center">
+                      <FileText className="w-7 h-7 text-muted-foreground/50" />
+                    </div>
+                    <div>
+                      {historyMode === "today" ? (
+                        <>
+                          <p className="text-sm font-bold text-foreground">Belum ada riwayat absensi</p>
+                          <p className="text-[11px] text-muted-foreground mt-1">Anda belum melakukan absensi hari ini.</p>
+                        </>
+                      ) : (
+                        <>
+                          <p className="text-sm font-bold text-foreground">Tidak ada riwayat absensi</p>
+                          <p className="text-[11px] text-muted-foreground mt-1">Tidak ada data absensi pada tanggal ini.</p>
+                        </>
+                      )}
+                    </div>
                   </div>
                 ) : (
                   <>
-                    {/* Ringkasan statistik periode */}
-                    {groupedHistory.length > 0 && (
-                      <div className="bg-white rounded-2xl border shadow-sm p-3">
-                        <p className="text-[8px] font-black text-muted-foreground uppercase mb-2">
-                          Ringkasan Periode
-                        </p>
-                        <div className="grid grid-cols-4 gap-1 text-center">
-                          <div>
-                            <p className="text-base font-black text-primary">{historySummary.totalPresent}</p>
-                            <p className="text-[8px] text-muted-foreground leading-tight">Hadir</p>
-                          </div>
-                          <div>
-                            <p className="text-base font-black text-red-500">{historySummary.totalLate}</p>
-                            <p className="text-[8px] text-muted-foreground leading-tight">Terlambat</p>
-                          </div>
-                          <div>
-                            <p className="text-base font-black text-orange-500">{historySummary.totalMissingOut}</p>
-                            <p className="text-[8px] text-muted-foreground leading-tight">Lupa Pulang</p>
-                          </div>
-                          <div>
-                            <p className="text-base font-black text-blue-500">
-                              {historySummary.totalWorkMinutes > 0
-                                ? `${Math.floor(historySummary.totalWorkMinutes / 60)}j`
-                                : "-"}
-                            </p>
-                            <p className="text-[8px] text-muted-foreground leading-tight">Total Jam</p>
-                          </div>
-                        </div>
-                      </div>
-                    )}
+                    {/* Judul tanggal aktif */}
+                    <div className="px-1">
+                      <p className="text-[9px] font-black text-muted-foreground uppercase tracking-widest">
+                        {historyMode === "today" ? "Riwayat Hari Ini" : "Riwayat Tanggal"}
+                      </p>
+                      <p className="text-sm font-bold text-foreground mt-0.5">
+                        {historyMode === "today"
+                          ? format(new Date(), "EEEE, dd MMMM yyyy", { locale: localeId })
+                          : pickedDate
+                            ? format(new Date(pickedDate + "T00:00:00"), "EEEE, dd MMMM yyyy", { locale: localeId })
+                            : ""}
+                      </p>
+                    </div>
 
-                    {filteredGroups.length === 0 ? (
-                      <div className="py-8 flex flex-col items-center gap-3 opacity-40">
-                        <FileText className="w-7 h-7 text-muted-foreground" />
-                        <p className="text-xs italic text-muted-foreground text-center">
-                          Tidak ada riwayat dengan status ini pada periode yang dipilih.
-                        </p>
-                      </div>
-                    ) : (
-                      <div className="space-y-3">
+                    <div className="space-y-3">
                         {filteredGroups.map(({ date, dateLabel, checkIn, checkOut, durationMinutes, dailyStatus }) => {
                           const addrIn = checkIn?.addressDetail
                             ? shortAddr(checkIn.addressDetail as AddressDetail) || checkIn.address
@@ -3043,126 +3138,153 @@ export default function AbsenPage() {
                           return (
                             <div key={date} className="bg-white rounded-2xl border shadow-sm overflow-hidden">
                               {/* Header tanggal + daily badge */}
-                              <div className="flex items-center justify-between px-3 py-2 bg-muted/20 border-b">
-                                <p className="text-[9px] font-black uppercase text-muted-foreground">{dateLabel}</p>
+                              <div className="flex items-center justify-between px-4 py-2.5 bg-muted/20 border-b">
+                                <p className="text-[11px] font-black text-foreground">{dateLabel}</p>
                                 <Badge className={`text-[7px] border-none shrink-0 ${dailyBadge.cls}`}>
                                   {dailyBadge.label}
                                 </Badge>
                               </div>
 
-                              <div className="p-3 space-y-2">
-                                {/* Row masuk */}
-                                <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-2">
-                                    <div className="w-7 h-7 rounded-xl bg-primary/10 flex items-center justify-center shrink-0">
-                                      <LogIn className="w-3.5 h-3.5 text-primary" />
+                              <div className="p-3 space-y-3">
+                                {/* Row masuk + pulang side-by-side */}
+                                <div className="grid grid-cols-2 gap-2">
+                                  {/* Masuk */}
+                                  <div className={`rounded-xl px-3 py-2 ${checkIn ? 'bg-primary/5' : 'bg-muted/30'}`}>
+                                    <div className="flex items-center gap-1 mb-0.5">
+                                      <LogIn className="w-3 h-3 text-primary shrink-0" />
+                                      <p className="text-[8px] font-bold text-primary uppercase">Masuk</p>
                                     </div>
-                                    <div>
-                                      <p className="text-[8px] font-bold text-muted-foreground uppercase">Masuk</p>
-                                      <p className="text-sm font-black tabular-nums">
-                                        {checkIn ? format(checkIn._date, "HH:mm") : "--:--"}
-                                        {checkIn && <span className="text-[8px] font-normal text-muted-foreground ml-1">WIB</span>}
-                                      </p>
-                                    </div>
+                                    <p className={`text-base font-black tabular-nums ${checkIn ? 'text-foreground' : 'text-muted-foreground/40'}`}>
+                                      {checkIn ? format(checkIn._date, "HH:mm") : "--:--"}
+                                    </p>
+                                    {checkIn && (
+                                      <div className="flex items-center gap-1 mt-1">
+                                        <span className="text-[8px] text-muted-foreground">WIB</span>
+                                        <Badge className={`text-[7px] border-none ${statusBadgeCls(checkIn.status)}`}>
+                                          {statusLabel(checkIn)}
+                                        </Badge>
+                                      </div>
+                                    )}
                                   </div>
-                                  {checkIn && (
-                                    <Badge className={`text-[7px] border-none shrink-0 ${statusBadgeCls(checkIn.status)}`}>
-                                      {statusLabel(checkIn)}
-                                    </Badge>
-                                  )}
-                                </div>
-
-                                {/* Row pulang */}
-                                <div className="flex items-center justify-between">
-                                  <div className="flex items-center gap-2">
-                                    <div className="w-7 h-7 rounded-xl bg-secondary/10 flex items-center justify-center shrink-0">
-                                      <LogOut className="w-3.5 h-3.5 text-secondary" />
+                                  {/* Pulang */}
+                                  <div className={`rounded-xl px-3 py-2 ${checkOut ? 'bg-secondary/5' : 'bg-muted/30'}`}>
+                                    <div className="flex items-center gap-1 mb-0.5">
+                                      <LogOut className="w-3 h-3 text-secondary shrink-0" />
+                                      <p className="text-[8px] font-bold text-secondary uppercase">Pulang</p>
                                     </div>
-                                    <div>
-                                      <p className="text-[8px] font-bold text-muted-foreground uppercase">Pulang</p>
-                                      <p className="text-sm font-black tabular-nums">
-                                        {checkOut ? format(checkOut._date, "HH:mm") : "--:--"}
-                                        {checkOut && <span className="text-[8px] font-normal text-muted-foreground ml-1">WIB</span>}
-                                      </p>
-                                    </div>
+                                    <p className={`text-base font-black tabular-nums ${checkOut ? 'text-foreground' : 'text-muted-foreground/40'}`}>
+                                      {checkOut ? format(checkOut._date, "HH:mm") : "--:--"}
+                                    </p>
+                                    {checkOut ? (
+                                      <div className="flex items-center gap-1 mt-1">
+                                        <span className="text-[8px] text-muted-foreground">WIB</span>
+                                        <Badge className={`text-[7px] border-none ${statusBadgeCls(checkOut.status)}`}>
+                                          {statusLabel(checkOut)}
+                                        </Badge>
+                                      </div>
+                                    ) : checkIn ? (
+                                      <p className="text-[8px] text-amber-600 font-semibold mt-1">Belum absen pulang</p>
+                                    ) : null}
                                   </div>
-                                  {checkOut && (
-                                    <Badge className={`text-[7px] border-none shrink-0 ${statusBadgeCls(checkOut.status)}`}>
-                                      {statusLabel(checkOut)}
-                                    </Badge>
-                                  )}
                                 </div>
 
                                 {/* Durasi kerja */}
                                 {durasiStr && (
-                                  <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground border-t pt-2">
+                                  <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground">
                                     <Clock className="w-3 h-3 shrink-0" />
                                     <span>Durasi kerja: <span className="font-black text-foreground">{durasiStr}</span></span>
                                   </div>
                                 )}
 
-                                {/* Lokasi masuk */}
-                                {addrIn && (
-                                  <div className="flex items-start gap-1.5 text-[8px] text-muted-foreground bg-muted/20 rounded-lg px-2 py-1.5">
-                                    <MapPin className="w-3 h-3 mt-0.5 shrink-0 text-primary/60" />
-                                    <div className="min-w-0">
-                                      <span className="font-bold text-[7px] uppercase text-primary/60">Masuk: </span>
-                                      <span className="line-clamp-1">{addrIn}</span>
-                                    </div>
-                                  </div>
-                                )}
-
-                                {/* Lokasi pulang (jika beda dengan masuk) */}
-                                {addrOut && addrOut !== addrIn && (
-                                  <div className="flex items-start gap-1.5 text-[8px] text-muted-foreground bg-muted/20 rounded-lg px-2 py-1.5">
-                                    <MapPin className="w-3 h-3 mt-0.5 shrink-0 text-secondary/60" />
-                                    <div className="min-w-0">
-                                      <span className="font-bold text-[7px] uppercase text-secondary/60">Pulang: </span>
-                                      <span className="line-clamp-1">{addrOut}</span>
-                                    </div>
-                                  </div>
-                                )}
-
-                                {/* ── Foto & Bukti Kondisi ─────────────────── */}
+                                {/* Lokasi + radius */}
                                 {(() => {
                                   const checkInCondId = checkIn?.checkInConditionReportId || null;
                                   const checkOutCondId = checkOut?.checkOutConditionReportId || null;
                                   const hasCondition = !!(checkIn?.hasConditionReport || checkInCondId || checkOutCondId);
                                   const needsReview = !!(checkIn?.needsHrdReview || checkIn?.checkInNeedsReview || checkOut?.needsHrdReview || checkOut?.checkOutNeedsReview);
+                                  const isOutsideRadiusIn = checkIn?.isOutsideRadius === true || checkIn?.checkInLocationStatus === 'outside_radius';
+                                  const isOutsideRadiusOut = checkOut?.isOutsideRadius === true || checkOut?.checkOutLocationStatus === 'outside_radius';
+                                  const siteName = checkIn?.siteName || checkOut?.siteName || null;
 
                                   return (
-                                    <div className="space-y-1.5 border-t pt-2">
-                                      {/* Selfie masuk */}
-                                      {driveFileId ? (
-                                        photoAccessible ? (
-                                          <button
-                                            onClick={() => setPhotoModal({ fileId: driveFileId, date, dateLabel, checkInTime: checkIn ? format(checkIn._date, "HH:mm") : null })}
-                                            className="flex items-center gap-1 text-[8px] text-primary font-semibold underline underline-offset-2 hover:text-primary/70 transition-colors"
-                                          >
-                                            <Camera className="w-2.5 h-2.5 shrink-0" /> Foto Selfie Masuk
-                                          </button>
-                                        ) : (
-                                          <p className="text-[8px] text-muted-foreground italic flex items-center gap-1">
-                                            <Camera className="w-2.5 h-2.5 shrink-0 opacity-40" /> Foto Selfie Masuk kedaluwarsa
-                                          </p>
-                                        )
-                                      ) : null}
+                                    <div className="space-y-2 border-t pt-2.5">
+                                      {/* Nama lokasi kantor */}
+                                      {siteName && (
+                                        <div className="flex items-center gap-1.5 text-[9px] text-muted-foreground">
+                                          <MapPin className="w-3 h-3 shrink-0 text-primary/50" />
+                                          <span className="font-semibold text-foreground">{siteName}</span>
+                                        </div>
+                                      )}
 
-                                      {/* Selfie pulang */}
-                                      {driveFileIdOut ? (
-                                        photoOutAccessible ? (
-                                          <button
-                                            onClick={() => setPhotoModal({ fileId: driveFileIdOut, date, dateLabel, checkInTime: checkOut ? format(checkOut._date, "HH:mm") : null })}
-                                            className="flex items-center gap-1 text-[8px] text-secondary font-semibold underline underline-offset-2 hover:text-secondary/70 transition-colors"
-                                          >
-                                            <Camera className="w-2.5 h-2.5 shrink-0" /> Foto Selfie Pulang
-                                          </button>
-                                        ) : (
-                                          <p className="text-[8px] text-muted-foreground italic flex items-center gap-1">
-                                            <Camera className="w-2.5 h-2.5 shrink-0 opacity-40" /> Foto Selfie Pulang kedaluwarsa
-                                          </p>
-                                        )
-                                      ) : null}
+                                      {/* Alamat masuk */}
+                                      {addrIn && (
+                                        <div className="flex items-start gap-1.5 text-[8px] text-muted-foreground bg-muted/20 rounded-lg px-2 py-1.5">
+                                          <MapPin className="w-3 h-3 mt-0.5 shrink-0 text-primary/50" />
+                                          <div className="min-w-0">
+                                            <span className="font-bold text-[7px] uppercase text-primary/60">Masuk: </span>
+                                            <span className="line-clamp-1">{addrIn}</span>
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {/* Alamat pulang (jika beda) */}
+                                      {addrOut && addrOut !== addrIn && (
+                                        <div className="flex items-start gap-1.5 text-[8px] text-muted-foreground bg-muted/20 rounded-lg px-2 py-1.5">
+                                          <MapPin className="w-3 h-3 mt-0.5 shrink-0 text-secondary/50" />
+                                          <div className="min-w-0">
+                                            <span className="font-bold text-[7px] uppercase text-secondary/60">Pulang: </span>
+                                            <span className="line-clamp-1">{addrOut}</span>
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {/* Radius badges — prominently shown */}
+                                      {checkIn && (
+                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                          <Badge className={`text-[8px] py-0.5 border-none ${isOutsideRadiusIn ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>
+                                            <MapPin className="w-2.5 h-2.5 mr-0.5" />
+                                            {isOutsideRadiusIn ? 'Di Luar Radius (Masuk)' : 'Dalam Radius (Masuk)'}
+                                          </Badge>
+                                          {checkOut && (
+                                            <Badge className={`text-[8px] py-0.5 border-none ${isOutsideRadiusOut ? 'bg-orange-100 text-orange-700' : 'bg-green-100 text-green-700'}`}>
+                                              <MapPin className="w-2.5 h-2.5 mr-0.5" />
+                                              {isOutsideRadiusOut ? 'Di Luar Radius (Pulang)' : 'Dalam Radius (Pulang)'}
+                                            </Badge>
+                                          )}
+                                        </div>
+                                      )}
+
+                                      {/* Foto selfie */}
+                                      <div className="flex items-center gap-3 flex-wrap">
+                                        {driveFileId && (
+                                          photoAccessible ? (
+                                            <button
+                                              onClick={() => setPhotoModal({ fileId: driveFileId, date, dateLabel, checkInTime: checkIn ? format(checkIn._date, "HH:mm") : null })}
+                                              className="flex items-center gap-1 text-[8px] text-primary font-semibold underline underline-offset-2 hover:text-primary/70 transition-colors"
+                                            >
+                                              <Camera className="w-2.5 h-2.5 shrink-0" /> Selfie Masuk
+                                            </button>
+                                          ) : (
+                                            <p className="text-[8px] text-muted-foreground/50 italic flex items-center gap-1">
+                                              <Camera className="w-2.5 h-2.5 shrink-0" /> Selfie Masuk kedaluwarsa
+                                            </p>
+                                          )
+                                        )}
+                                        {driveFileIdOut && (
+                                          photoOutAccessible ? (
+                                            <button
+                                              onClick={() => setPhotoModal({ fileId: driveFileIdOut, date, dateLabel, checkInTime: checkOut ? format(checkOut._date, "HH:mm") : null })}
+                                              className="flex items-center gap-1 text-[8px] text-secondary font-semibold underline underline-offset-2 hover:text-secondary/70 transition-colors"
+                                            >
+                                              <Camera className="w-2.5 h-2.5 shrink-0" /> Selfie Pulang
+                                            </button>
+                                          ) : (
+                                            <p className="text-[8px] text-muted-foreground/50 italic flex items-center gap-1">
+                                              <Camera className="w-2.5 h-2.5 shrink-0" /> Selfie Pulang kedaluwarsa
+                                            </p>
+                                          )
+                                        )}
+                                      </div>
 
                                       {/* Kondisi khusus */}
                                       {hasCondition && (
@@ -3221,7 +3343,6 @@ export default function AbsenPage() {
                           );
                         })}
                       </div>
-                    )}
                   </>
                 )}
               </>
@@ -3229,6 +3350,26 @@ export default function AbsenPage() {
           </TabsContent>
         </Tabs>
       </div>
+
+      {/* ── Sticky Install CTA ──────────────────────────────────────────────── */}
+      {!isInstalled && (
+        <div className="sticky bottom-0 z-40 max-w-md mx-auto w-full px-4 pb-4 pt-2 bg-gradient-to-t from-background via-background/95 to-transparent pointer-events-none">
+          <div className="pointer-events-auto bg-white border shadow-lg rounded-2xl px-4 py-3 flex items-center gap-3">
+            <div className="w-9 h-9 rounded-xl bg-primary/10 flex items-center justify-center shrink-0 text-lg">📲</div>
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] font-black text-slate-800 leading-tight">Pasang Aplikasi Web Absen</p>
+              <p className="text-[9px] text-muted-foreground leading-snug">Akses lebih cepat &amp; dapatkan pengingat absen.</p>
+            </div>
+            <Button
+              onClick={handleInstallApp}
+              size="sm"
+              className="rounded-xl text-[11px] font-black h-9 px-3 shrink-0 bg-primary text-white hover:bg-primary/90"
+            >
+              {isIosBrowser ? 'Cara Pasang' : 'Pasang'}
+            </Button>
+          </div>
+        </div>
+      )}
 
       {/* ── Photo modal ───────────────────────────────────────────────────────── */}
       {photoModal && (
