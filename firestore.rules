@@ -8,13 +8,24 @@ service cloud.firestore {
       return request.auth != null;
     }
 
-    function isPrivileged() {
-      // HRD / Manager / SuperAdmin — baca dari users/{uid}.role
-      // Cek exists() lebih dulu agar tidak error jika dokumen belum ada
+    function isHrd() {
       return isSignedIn()
         && exists(/databases/$(database)/documents/users/$(request.auth.uid))
         && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
-           in ['hrd', 'manager', 'superadmin', 'super-admin'];
+           in ['hrd', 'manager'];
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn()
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid))
+        && get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role
+           in ['superadmin', 'super-admin'];
+    }
+
+    function isPrivileged() {
+      // HRD / Manager / SuperAdmin — baca dari users/{uid}.role
+      // Cek exists() lebih dulu agar tidak error jika dokumen belum ada
+      return isHrd() || isSuperAdmin();
     }
 
     // Cek apakah request membuat dokumen yang mengandung uid milik sendiri
@@ -125,34 +136,108 @@ service cloud.firestore {
 
     // ── attendance_condition_reports ─────────────────────────────────────────
     match /attendance_condition_reports/{reportId} {
-      // Staff: create laporan milik sendiri (uid + employeeUid harus sama dengan auth.uid)
-      allow create: if isSignedIn()
-        && request.resource.data.uid == request.auth.uid
-        && request.resource.data.employeeUid == request.auth.uid;
 
-      // Staff: baca laporan milik sendiri
-      allow get, list: if isSignedIn() && (isOwnDoc() || isPrivileged());
+      // Cek kepemilikan dari data dokumen (uid atau employeeUid)
+      function isConditionReportOwner(data) {
+        return isSignedIn() && (
+          data.get('uid', '') == request.auth.uid ||
+          data.get('employeeUid', '') == request.auth.uid
+        );
+      }
 
-      // HRD: boleh update hanya field review (reviewStatus, reviewNote, reviewedAt, reviewedByUid)
-      // Staff: tidak boleh mengubah field review
-      allow update: if isPrivileged()
-        || (isOwnDoc() && isSignedIn()
-            && !("reviewStatus"  in request.resource.data.diff(resource.data).affectedKeys())
-            && !("reviewNote"    in request.resource.data.diff(resource.data).affectedKeys())
-            && !("reviewedAt"    in request.resource.data.diff(resource.data).affectedKeys())
-            && !("reviewedByUid" in request.resource.data.diff(resource.data).affectedKeys()));
+      // Cek kepemilikan dari data yang sedang di-create (request.resource)
+      function isConditionReportOwnerOnCreate(data) {
+        return isSignedIn() && (
+          data.get('uid', '') == request.auth.uid ||
+          data.get('employeeUid', '') == request.auth.uid
+        );
+      }
 
-      allow delete: if isPrivileged();
+      // Staff: create laporan milik sendiri
+      allow create: if isConditionReportOwnerOnCreate(request.resource.data);
+
+      // Staff/HRD: get dokumen tunggal
+      allow get: if isSignedIn() && (
+        isSuperAdmin() ||
+        isHrd() ||
+        isConditionReportOwner(resource.data)
+      );
+
+      // Staff: list hanya dokumen milik sendiri
+      // Firestore memverifikasi per-dokumen bahwa uid/employeeUid == request.auth.uid
+      // Query karyawan WAJIB selalu mengandung where("uid","==",user.uid)
+      // atau where("employeeUid","==",user.uid) agar rule ini terpenuhi
+      allow list: if isSignedIn() && (
+        isSuperAdmin() ||
+        isHrd() ||
+        isConditionReportOwner(resource.data)
+      );
+
+      // HRD: update bebas. Staff: hanya boleh update field non-review selama masih pending
+      allow update: if isSignedIn() && (
+        isSuperAdmin() ||
+        isHrd() ||
+        (
+            isConditionReportOwner(resource.data)
+            && resource.data.get('reviewStatus', 'pending') == 'pending'
+            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+              'note', 'conditionNote',
+              'proofPhotoUrl', 'proofPhotoPath',
+              'conditionProofPhotoUrl', 'conditionProofFileId',
+              'proofPhotoFileId', 'driveFileId',
+              'driveViewUrl', 'driveDownloadUrl',
+              'attachmentUrls', 'attachments',
+              'reportLocationAddress', 'reportLocationLat',
+              'reportLocationLng', 'reportGpsAccuracy',
+              'linkedAttendanceId', 'linkedAt', 'updatedAt'
+            ])
+        )
+      );
+
+      allow delete: if isSuperAdmin();
     }
 
 
     // ── Push Notification Tokens ─────────────────────────────────────────────
     match /attendance_notification_tokens/{tokenId} {
-      // User boleh create/read/update token miliknya sendiri
       allow create: if isSignedIn() && request.resource.data.uid == request.auth.uid;
-      allow read, update: if isSignedIn() && resource.data.uid == request.auth.uid;
-      // HRD/Admin bisa baca semua untuk monitoring
-      allow list, read: if isPrivileged();
+      allow get, list: if isSignedIn() && (
+        resource.data.uid == request.auth.uid ||
+        isHrd() ||
+        isSuperAdmin()
+      );
+      allow update: if isSignedIn() && (
+        resource.data.uid == request.auth.uid ||
+        isSuperAdmin()
+      );
+      allow delete: if isSignedIn() && (
+        resource.data.uid == request.auth.uid ||
+        isSuperAdmin()
+      );
+    }
+
+    match /notification_tokens/{tokenId} {
+      allow create: if isSignedIn()
+        && request.resource.data.uid == request.auth.uid;
+
+      allow get, list: if isSignedIn()
+        && (
+          resource.data.uid == request.auth.uid ||
+          isHrd() ||
+          isSuperAdmin()
+        );
+
+      allow update: if isSignedIn()
+        && (
+          resource.data.uid == request.auth.uid ||
+          isSuperAdmin()
+        );
+
+      allow delete: if isSignedIn()
+        && (
+          resource.data.uid == request.auth.uid ||
+          isSuperAdmin()
+        );
     }
 
     // ── Push Notification Logs ───────────────────────────────────────────────

@@ -28,24 +28,33 @@ export async function POST(req: NextRequest) {
 
     const db = getAdminFirestore();
 
-    const q = endpoint
-      ? db.collection('attendance_notification_tokens')
-          .where('uid', '==', uid)
-          .where('subscription.endpoint', '==', endpoint)
-          .limit(1)
-      : db.collection('attendance_notification_tokens')
-          .where('uid', '==', uid)
-          .where('enabled', '==', true);
-
-    const snap = await q.get();
+    const snap = await db.collection('attendance_notification_tokens')
+      .where('uid', '==', uid)
+      .limit(20)
+      .get();
+    const docsToDisable = snap.docs.filter(doc => {
+      const data = doc.data();
+      if (endpoint) return data.subscription?.endpoint === endpoint;
+      return data.enabled !== false || data.isActive !== false;
+    });
     const batch = db.batch();
-    snap.docs.forEach(d => batch.update(d.ref, {
+    docsToDisable.forEach(d => batch.update(d.ref, {
       enabled: false,
+      isActive: false,
       updatedAt: FieldValue.serverTimestamp(),
     }));
+    docsToDisable.forEach(d => batch.set(
+      db.collection('notification_tokens').doc(d.id),
+      {
+        enabled: false,
+        isActive: false,
+        updatedAt: FieldValue.serverTimestamp(),
+      },
+      { merge: true },
+    ));
     await batch.commit();
 
-    return NextResponse.json({ success: true, disabled: snap.size });
+    return NextResponse.json({ success: true, disabled: docsToDisable.length });
   } catch (err: any) {
     console.error('[unsubscribe]', err);
     return NextResponse.json({ error: err.message || 'Internal error' }, { status: 500 });

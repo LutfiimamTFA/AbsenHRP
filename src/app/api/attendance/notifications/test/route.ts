@@ -35,11 +35,14 @@ export async function POST(req: NextRequest) {
   const db = getAdminFirestore();
   const tokensSnap = await db.collection('attendance_notification_tokens')
     .where('uid', '==', uid)
-    .where('enabled', '==', true)
-    .limit(5)
+    .limit(10)
     .get();
+  const activeTokenDocs = tokensSnap.docs.filter(doc => {
+    const data = doc.data();
+    return data.enabled !== false && data.isActive !== false && !!data.subscription?.endpoint;
+  }).slice(0, 5);
 
-  if (tokensSnap.empty) {
+  if (activeTokenDocs.length === 0) {
     return NextResponse.json({ error: 'Tidak ada subscription aktif untuk akun ini' }, { status: 404 });
   }
 
@@ -54,15 +57,37 @@ export async function POST(req: NextRequest) {
   let failed = 0;
   const errors: string[] = [];
 
-  for (const tokenDoc of tokensSnap.docs) {
+  for (const tokenDoc of activeTokenDocs) {
     const tokenData = tokenDoc.data();
     try {
       await webpush.sendNotification(tokenData.subscription, payload);
-      await tokenDoc.ref.update({ lastUsedAt: FieldValue.serverTimestamp() });
+      await tokenDoc.ref.update({
+        lastUsedAt: FieldValue.serverTimestamp(),
+        lastSeenAt: FieldValue.serverTimestamp(),
+        enabled: true,
+        isActive: true,
+      });
+      await db.collection('notification_tokens').doc(tokenDoc.id).set({
+        lastUsedAt: FieldValue.serverTimestamp(),
+        lastSeenAt: FieldValue.serverTimestamp(),
+        enabled: true,
+        isActive: true,
+      }, { merge: true });
       sent++;
     } catch (err: any) {
       if (err?.statusCode === 410 || err?.statusCode === 404) {
-        await tokenDoc.ref.update({ enabled: false, updatedAt: FieldValue.serverTimestamp() });
+        await tokenDoc.ref.update({
+          enabled: false,
+          isActive: false,
+          updatedAt: FieldValue.serverTimestamp(),
+          lastError: err?.message || 'invalid_push_subscription',
+        });
+        await db.collection('notification_tokens').doc(tokenDoc.id).set({
+          enabled: false,
+          isActive: false,
+          updatedAt: FieldValue.serverTimestamp(),
+          lastError: err?.message || 'invalid_push_subscription',
+        }, { merge: true });
       }
       failed++;
       errors.push(err?.message || 'unknown');
@@ -72,6 +97,12 @@ export async function POST(req: NextRequest) {
   if (sent > 0) {
     return NextResponse.json({ success: true, sent, failed });
   } else {
-    return NextResponse.json({ success: false, sent, failed, errors }, { status: 500 });
+    return NextResponse.json({
+      success: false,
+      sent,
+      failed,
+      errors,
+      error: 'Token notifikasi tidak valid. Silakan aktifkan ulang.',
+    }, { status: 500 });
   }
 }

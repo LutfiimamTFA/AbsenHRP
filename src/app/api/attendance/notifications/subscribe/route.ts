@@ -7,7 +7,17 @@ export const runtime = 'nodejs';
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { subscription, uid, employeeName, employeeEmail, brandId, siteId, platform, userAgent } = body;
+    const {
+      subscription,
+      uid,
+      employeeName,
+      employeeEmail,
+      brandId,
+      brandName,
+      siteId,
+      platform,
+      userAgent,
+    } = body;
 
     if (!subscription?.endpoint || !uid) {
       return NextResponse.json({ error: 'subscription dan uid wajib diisi' }, { status: 400 });
@@ -33,32 +43,37 @@ export async function POST(req: NextRequest) {
     // Cari token yang sudah ada untuk endpoint ini
     const existing = await db.collection('attendance_notification_tokens')
       .where('uid', '==', uid)
-      .where('subscription.endpoint', '==', subscription.endpoint)
-      .limit(1)
+      .limit(20)
       .get();
+    const existingDoc = existing.docs.find(doc => doc.data()?.subscription?.endpoint === subscription.endpoint);
 
     const data = {
       uid,
+      employeeUid: uid,
       employeeName: employeeName || null,
       employeeEmail: employeeEmail || null,
       brandId: brandId || null,
+      brandName: brandName || null,
       siteId: siteId || null,         // boleh null — server resolve by brandId
+      token: subscription.endpoint,
       subscription,
       platform: platform || 'web',
       userAgent: userAgent || null,
       enabled: true,
+      isActive: true,
       reminderCheckIn: true,
       reminderCheckOut: true,
       reminderMinutesBefore: 15,
       permissionStatus: 'granted',
       updatedAt: FieldValue.serverTimestamp(),
       lastUsedAt: FieldValue.serverTimestamp(),
+      lastSeenAt: FieldValue.serverTimestamp(),
     };
 
     let id: string;
-    if (!existing.empty) {
-      await existing.docs[0].ref.update(data);
-      id = existing.docs[0].id;
+    if (existingDoc) {
+      await existingDoc.ref.update(data);
+      id = existingDoc.id;
     } else {
       const ref = await db.collection('attendance_notification_tokens').add({
         ...data,
@@ -66,6 +81,20 @@ export async function POST(req: NextRequest) {
       });
       id = ref.id;
     }
+
+    await db.collection('notification_tokens').doc(id).set({
+      ...data,
+      createdAt: FieldValue.serverTimestamp(),
+    }, { merge: true });
+
+    console.log('[WEB_PUSH_TOKEN_DEBUG]', {
+      uid,
+      permission: 'granted',
+      tokenExists: !!subscription.endpoint,
+      tokenSaved: true,
+      tokenId: id,
+      platform: data.platform,
+    });
 
     return NextResponse.json({ success: true, id });
   } catch (err: any) {

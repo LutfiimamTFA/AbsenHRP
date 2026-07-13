@@ -50,16 +50,19 @@ self.addEventListener('push', e => {
   let data = {};
   try { data = e.data?.json() ?? {}; } catch {}
 
-  const title = data.title || 'EGS Attendance';
-  const body  = data.body  || 'Ada pengingat absen untuk Anda.';
-  const url   = data.url   || '/absen';
-  const tag   = data.type  || 'absen-reminder';
+  const notification = data.notification || {};
+  const title = data.title || notification.title || 'EGS Attendance';
+  const body  = data.body  || notification.body  || 'Ada pengingat absen untuk Anda.';
+  const url   = data.url   || data.click_action || data.link || '/absen';
+  const tag   = data.type  || data.tag || 'absen-reminder';
+  const icon  = data.icon  || notification.icon || '/icon-192.png';
+  const badge = data.badge || '/notification-icon.png';
 
   e.waitUntil(
     self.registration.showNotification(title, {
       body,
-      icon:  '/icon-192.png',
-      badge: '/notification-icon.png',
+      icon,
+      badge,
       tag,
       renotify: false,
       requireInteraction: false,

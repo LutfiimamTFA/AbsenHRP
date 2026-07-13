@@ -298,8 +298,10 @@ export default function AbsenPage() {
   const [loadingConditionReports, setLoadingConditionReports] = useState(false);
   // Push notification
   type NotifPermission = 'default' | 'granted' | 'denied' | 'unsupported' | 'loading';
+  type NotifTokenStatus = 'checking' | 'not_enabled' | 'active' | 'expired';
   const [notifPermission, setNotifPermission] = useState<NotifPermission>('default');
   const [notifSubscribed, setNotifSubscribed] = useState(false);
+  const [notifTokenStatus, setNotifTokenStatus] = useState<NotifTokenStatus>('checking');
   const [notifLoading, setNotifLoading] = useState(false);
 
   // PWA install — status machine
@@ -427,21 +429,65 @@ export default function AbsenPage() {
 
   // ── Push notification: init permission status ─────────────────
   useEffect(() => {
+    let cancelled = false;
     if (typeof Notification === 'undefined' || !('serviceWorker' in navigator) || !('PushManager' in window)) {
       setNotifPermission('unsupported');
+      setNotifTokenStatus('not_enabled');
       return;
     }
     const perm = Notification.permission as NotifPermission;
     setNotifPermission(perm);
-    if (perm === 'granted') {
-      // Cek apakah ada subscription aktif — gunakan getRegistration agar tidak menunggu SW aktif
-      navigator.serviceWorker.getRegistration('/').then(reg => {
-        if (reg?.active) {
-          return reg.pushManager.getSubscription().then(sub => setNotifSubscribed(!!sub));
-        }
-      }).catch(err => console.warn('[SW] init getSubscription:', err));
+    if (perm !== 'granted' || !user?.uid) {
+      setNotifSubscribed(false);
+      setNotifTokenStatus(perm === 'denied' ? 'expired' : 'not_enabled');
+      return;
     }
-  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+
+    setNotifTokenStatus('checking');
+    (async () => {
+      try {
+        const reg = await navigator.serviceWorker.getRegistration('/');
+        const sub = await reg?.pushManager.getSubscription();
+        if (!sub) {
+          if (!cancelled) {
+            setNotifSubscribed(false);
+            setNotifTokenStatus('not_enabled');
+          }
+          return;
+        }
+
+        const { getAuth } = await import('firebase/auth');
+        const idToken = await getAuth().currentUser?.getIdToken();
+        if (!idToken) throw new Error('Sesi tidak ditemukan');
+
+        const res = await fetch(`/api/attendance/notifications/status?endpoint=${encodeURIComponent(sub.endpoint)}`, {
+          headers: { Authorization: `Bearer ${idToken}` },
+        });
+        const data = await res.json().catch(() => ({}));
+        const active = res.ok && data.active === true;
+        if (!cancelled) {
+          setNotifSubscribed(active);
+          setNotifTokenStatus(active ? 'active' : 'expired');
+        }
+        console.log("[WEB_PUSH_TOKEN_DEBUG]", {
+          uid: user.uid,
+          permission: perm,
+          tokenExists: !!sub,
+          tokenSaved: active,
+        });
+      } catch (err) {
+        console.warn('[Notif] status check failed:', err);
+        if (!cancelled) {
+          setNotifSubscribed(false);
+          setNotifTokenStatus('expired');
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.uid]);
 
   // ── Site loader ────────────────────────────────────────────────
   useEffect(() => {
@@ -483,32 +529,98 @@ export default function AbsenPage() {
 
   // ── Condition reports hari ini — realtime onSnapshot ──────────
   useEffect(() => {
-    if (!user?.uid || !isAttendanceAllowed) return;
-    const todayStr = format(new Date(), "yyyy-MM-dd");
+    if (!user?.uid || !isAttendanceAllowed) {
+      setTodayConditionReports([]);
+      setLoadingConditionReports(false);
+      return;
+    }
+    const todayDateKey = format(new Date(), "yyyy-MM-dd");
     setLoadingConditionReports(true);
-    const q = query(
-      collection(db, "attendance_condition_reports"),
-      where("uid", "==", user.uid),
-      where("reportDate", "==", todayStr),
-    );
-    const unsub = onSnapshot(
-      q,
-      snap => {
-        setTodayConditionReports(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+
+    const querySpecs = [
+      { ownerField: "uid", dateField: "dateKey", queryMode: "owner_by_uid_and_dateKey" },
+      { ownerField: "employeeUid", dateField: "dateKey", queryMode: "owner_by_employeeUid_and_dateKey" },
+      { ownerField: "uid", dateField: "reportDate", queryMode: "owner_by_uid_and_reportDate" },
+      { ownerField: "employeeUid", dateField: "reportDate", queryMode: "owner_by_employeeUid_and_reportDate" },
+    ] as const;
+
+    const queryDocs = new Map<string, any[]>();
+    const initialized = new Set<string>();
+    let settledInitialQueries = 0;
+    let failedInitialQueries = 0;
+    let active = true;
+
+    const flushMergedReports = () => {
+      if (!active) return;
+      const merged = new Map<string, any>();
+      for (const docs of queryDocs.values()) {
+        for (const row of docs) {
+          merged.set(row.id, { ...(merged.get(row.id) || {}), ...row });
+        }
+      }
+      setTodayConditionReports(Array.from(merged.values()));
+    };
+
+    const markInitialSettled = (key: string, failed = false) => {
+      if (initialized.has(key)) return;
+      initialized.add(key);
+      settledInitialQueries += 1;
+      if (failed) failedInitialQueries += 1;
+      if (settledInitialQueries === querySpecs.length) {
         setLoadingConditionReports(false);
-      },
-      err => {
-        console.error("[attendance_condition_reports] onSnapshot error:", err);
-        toast({
-          variant: "destructive",
-          title: "Gagal memuat laporan kondisi",
-          description: err.message || "Cek koneksi dan coba refresh.",
-        });
-        setLoadingConditionReports(false);
-      },
-    );
-    return () => unsub();
-  }, [db, user?.uid, isAttendanceAllowed, toast]);
+        if (failedInitialQueries === querySpecs.length) {
+          console.warn("[attendance_condition_reports] owner-scoped queries unavailable; continuing with empty condition reports", {
+            uid: user.uid,
+            todayDateKey,
+            failedInitialQueries,
+            totalQueries: querySpecs.length,
+          });
+        }
+      }
+    };
+
+    const unsubscribers = querySpecs.map(({ ownerField, dateField, queryMode }) => {
+      const key = `${ownerField}:${dateField}`;
+      console.log("[WEB_ABSEN_CONDITION_REPORT_QUERY_DEBUG]", {
+        uid: user.uid,
+        todayDateKey,
+        queryMode,
+        fields: [ownerField, dateField],
+      });
+
+      return onSnapshot(
+        query(
+          collection(db, "attendance_condition_reports"),
+          where(ownerField, "==", user.uid),
+          where(dateField, "==", todayDateKey),
+        ),
+        snap => {
+          queryDocs.set(key, snap.docs.map(d => ({ id: d.id, ...d.data() })));
+          flushMergedReports();
+          markInitialSettled(key);
+        },
+        err => {
+          queryDocs.set(key, []);
+          console.warn("[attendance_condition_reports] owner-scoped query unavailable:", {
+            uid: user.uid,
+            todayDateKey,
+            queryMode,
+            fields: [ownerField, dateField],
+            code: err?.code || null,
+            name: err?.name || null,
+            message: err?.message,
+          });
+          flushMergedReports();
+          markInitialSettled(key, true);
+        },
+      );
+    });
+
+    return () => {
+      active = false;
+      unsubscribers.forEach(unsub => unsub());
+    };
+  }, [db, user?.uid, isAttendanceAllowed]);
 
   // ── Live GPS watch ─────────────────────────────────────────────
   useEffect(() => {
@@ -1224,6 +1336,7 @@ export default function AbsenPage() {
             employeeName: user.displayName || null,
             employeeEmail: (user as any).email || null,
             brandId: user.brandId || null,
+            brandName: user.brandName || null,
             siteId: activeSite?.id || null,
             platform,
             userAgent: navigator.userAgent,
@@ -1241,6 +1354,13 @@ export default function AbsenPage() {
 
       // 5. Simpan state hanya setelah token berhasil tersimpan di server
       setNotifSubscribed(true);
+      setNotifTokenStatus('active');
+      console.log("[WEB_PUSH_TOKEN_DEBUG]", {
+        uid: user.uid,
+        permission: perm,
+        tokenExists: !!sub,
+        tokenSaved: true,
+      });
       toast({ title: 'Notifikasi Aktif', description: 'Anda akan mendapat pengingat sebelum jam masuk dan pulang.' });
     } catch (err: any) {
       console.error('[enableNotifications]', err);
@@ -1269,6 +1389,7 @@ export default function AbsenPage() {
       }
 
       setNotifSubscribed(false);
+      setNotifTokenStatus('not_enabled');
       toast({ title: 'Notifikasi Dinonaktifkan', description: 'Anda tidak akan menerima pengingat absen.' });
     } catch (err: any) {
       console.error('[disableNotifications]', err);
@@ -1291,10 +1412,14 @@ export default function AbsenPage() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || !data.success) throw new Error(data.error || `Server error ${res.status}`);
-      toast({ title: 'Notifikasi Tes Terkirim', description: 'Periksa notifikasi di HP Anda.' });
+      setNotifSubscribed(true);
+      setNotifTokenStatus('active');
+      toast({ title: 'Notifikasi tes berhasil dikirim', description: 'Periksa notifikasi di perangkat Anda.' });
     } catch (err: any) {
       console.error('[sendTestNotification]', err);
-      toast({ variant: 'destructive', title: 'Tes gagal', description: err.message || 'Coba lagi.' });
+      setNotifSubscribed(false);
+      setNotifTokenStatus('expired');
+      toast({ variant: 'destructive', title: 'Token notifikasi tidak valid', description: err.message || 'Silakan aktifkan ulang.' });
     } finally {
       setNotifLoading(false);
     }
@@ -1397,6 +1522,9 @@ export default function AbsenPage() {
       const gps = locationRef.current;
 
       let proofPhotoUrl: string | null = null;
+      let conditionProofFileId: string | null = null;
+      let driveViewUrl: string | null = null;
+      let driveDownloadUrl: string | null = null;
       const ts = format(now, 'yyyyMMdd-HHmmss');
       const idStr = user.employeeId || user.uid.slice(0, 8);
       const fileName = `condition-report-${conditionType}-${idStr}-${ts}.jpg`;
@@ -1413,9 +1541,13 @@ export default function AbsenPage() {
         }),
       });
       const uploadData = await uploadRes.json().catch(() => null);
-      if (uploadData?.success) {
-        proofPhotoUrl = uploadData.viewUrl || uploadData.downloadUrl || null;
+      if (!uploadRes.ok || !uploadData?.success) {
+        throw new Error(uploadData?.error || 'Gagal mengunggah foto kondisi ke Google Drive.');
       }
+      conditionProofFileId = uploadData.fileId || null;
+      driveViewUrl = uploadData.viewUrl || null;
+      driveDownloadUrl = uploadData.downloadUrl || null;
+      proofPhotoUrl = driveViewUrl || driveDownloadUrl || null;
 
       // Gunakan liveAddress jika sudah ada (cached), else geocode sekarang
       let reportAddr: AddressDetail | null = liveAddress;
@@ -1425,6 +1557,7 @@ export default function AbsenPage() {
       const addressStr = reportAddr
         ? [reportAddr.road, reportAddr.kecamatan, reportAddr.kabupatenKota, reportAddr.province].filter(Boolean).join(', ') || reportAddr.displayName
         : null;
+      const typeLabel = conditionType === 'check_in' ? 'Kondisi Masuk' : 'Kondisi Pulang';
 
       const report = cleanUndefined({
         uid: user.uid,
@@ -1435,7 +1568,10 @@ export default function AbsenPage() {
         brandName: user.brandName || null,
         siteId: activeSite?.id || null,
         siteName: activeSite?.name || null,
+        dateKey: todayStr,
         reportDate: todayStr,
+        conditionType,
+        conditionTypeLabel: typeLabel,
         reportType: conditionType,
         reasonKey: conditionReason,
         reasonLabel: conditionReason,
@@ -1445,6 +1581,19 @@ export default function AbsenPage() {
         conditionNote: conditionNote.trim(),
         conditionProofPhotoUrl: proofPhotoUrl,
         proofPhotoUrl,
+        conditionProofFileId,
+        proofPhotoFileId: conditionProofFileId,
+        driveFileId: conditionProofFileId,
+        driveViewUrl,
+        driveDownloadUrl,
+        attachmentUrls: proofPhotoUrl ? [proofPhotoUrl] : [],
+        attachments: conditionProofFileId ? [{
+          fileId: conditionProofFileId,
+          viewUrl: driveViewUrl,
+          downloadUrl: driveDownloadUrl,
+          type: 'condition_proof',
+          fileName,
+        }] : [],
         conditionProofType: 'reason_proof',
         conditionProofTakenAt: proofPhotoUrl ? now.toISOString() : null,
         reportLocationLat: gps?.lat ?? null,
@@ -1462,16 +1611,27 @@ export default function AbsenPage() {
         reportedAt: now.toISOString(),
       });
 
-      // onSnapshot handles state update; we only need the doc ID for local optimistic update
-      const docRef = await addDoc(collection(db, "attendance_condition_reports"), {
+      const payload = {
         ...report,
         createdAt: serverTimestamp(),
         updatedAt: serverTimestamp(),
+      };
+      console.log("[WEB_ABSEN_CONDITION_REPORT_CREATE_DEBUG]", {
+        uid: payload.uid,
+        employeeUid: payload.employeeUid,
+        dateKey: payload.dateKey,
+        reportDate: payload.reportDate,
+        conditionProofPhotoUrl: payload.conditionProofPhotoUrl,
+        proofPhotoUrl: payload.proofPhotoUrl,
+        driveFileId: payload.driveFileId,
       });
+
+      // onSnapshot handles state update; we only need the doc ID for local optimistic update
+      const docRef = await addDoc(collection(db, "attendance_condition_reports"), payload);
       void docRef; // ID available if needed for linking
       cancelConditionReport();
-      const typeLabel = conditionType === 'check_in' ? 'masuk' : 'pulang';
-      toast({ title: 'Laporan terkirim', description: `Kondisi ${typeLabel} telah dilaporkan ke HRD untuk direview.` });
+      const attendanceTypeLabel = conditionType === 'check_in' ? 'masuk' : 'pulang';
+      toast({ title: 'Laporan terkirim', description: `Kondisi ${attendanceTypeLabel} telah dilaporkan ke HRD untuk direview.` });
     } catch (err: any) {
       toast({ variant: 'destructive', title: 'Gagal mengirim laporan', description: err.message || 'Coba lagi.' });
       setConditionStep('form');
@@ -2965,6 +3125,16 @@ export default function AbsenPage() {
                 window.matchMedia('(display-mode: standalone)').matches || (navigator as any).standalone === true
               );
               const iOSNeedsInstall = isIOS && !isStandalone;
+              const startTime = activeSite?.shift?.startTime || activeSite?.shift?.jamMasuk || null;
+              const endTime = activeSite?.shift?.endTime || activeSite?.shift?.jamPulang || null;
+              const reminderTime = (time: string | null) => {
+                if (!time || !/^\d{1,2}:\d{2}$/.test(time)) return null;
+                const [h, m] = time.split(':').map(Number);
+                const total = ((h * 60 + m - 15) % 1440 + 1440) % 1440;
+                return `${String(Math.floor(total / 60)).padStart(2, '0')}:${String(total % 60).padStart(2, '0')}`;
+              };
+              const checkInReminder = reminderTime(startTime);
+              const checkOutReminder = reminderTime(endTime);
 
               return (
                 <div className="bg-white rounded-2xl border shadow-sm overflow-hidden">
@@ -2997,14 +3167,45 @@ export default function AbsenPage() {
                           </p>
                         </div>
                       </div>
-                    ) : notifSubscribed && notifPermission === 'granted' ? (
+                    ) : notifPermission === 'granted' && notifTokenStatus === 'checking' ? (
+                      <div className="space-y-2">
+                        <div className="flex items-center gap-2">
+                          <Loader2 className="w-3.5 h-3.5 animate-spin text-slate-500" />
+                          <p className="text-[11px] font-bold text-slate-700">Memeriksa token notifikasi</p>
+                        </div>
+                        <p className="text-[9px] text-muted-foreground leading-snug">
+                          Sistem sedang memastikan token push tersimpan di server.
+                        </p>
+                      </div>
+                    ) : notifPermission === 'granted' && notifTokenStatus === 'expired' ? (
+                      <div className="space-y-3">
+                        <div className="flex items-center gap-2">
+                          <div className="w-2 h-2 rounded-full bg-amber-500" />
+                          <p className="text-[11px] font-bold text-amber-700">Notifikasi perlu diaktifkan ulang</p>
+                        </div>
+                        <p className="text-[9px] text-muted-foreground leading-snug">
+                          Token push belum tersimpan atau sudah tidak valid. Aktifkan ulang agar pengingat bisa dikirim.
+                        </p>
+                        <Button
+                          onClick={enableNotifications}
+                          disabled={notifLoading || iOSNeedsInstall}
+                          variant="outline"
+                          className="w-full h-10 rounded-xl text-[11px] font-black gap-1.5 border-amber-300 text-amber-700 hover:bg-amber-50"
+                        >
+                          {notifLoading
+                            ? <><Loader2 className="w-3.5 h-3.5 animate-spin" /> Mengaktifkan…</>
+                            : <><Bell className="w-3.5 h-3.5" /> Aktifkan Ulang</>
+                          }
+                        </Button>
+                      </div>
+                    ) : notifSubscribed && notifPermission === 'granted' && notifTokenStatus === 'active' ? (
                       <div className="space-y-2">
                         <div className="flex items-center gap-2">
                           <div className="w-2 h-2 rounded-full bg-green-500" />
                           <p className="text-[11px] font-bold text-green-700">Notifikasi Aktif</p>
                         </div>
                         <p className="text-[9px] text-muted-foreground leading-snug">
-                          Pengingat masuk {activeSite?.shift?.startTime ? `pukul ${activeSite.shift.startTime}` : ''} dan pulang {activeSite?.shift?.endTime ? `pukul ${activeSite.shift.endTime}` : ''} — dikirim 15 menit sebelumnya.
+                          Pengingat masuk {checkInReminder ? `pukul ${checkInReminder}` : 'mengikuti jadwal'} dan pulang {checkOutReminder ? `pukul ${checkOutReminder}` : 'mengikuti jadwal'}.
                         </p>
                         <div className="flex gap-3">
                           <button
