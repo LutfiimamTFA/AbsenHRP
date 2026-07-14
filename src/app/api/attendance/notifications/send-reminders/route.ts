@@ -153,9 +153,10 @@ function inReminderWindow(nowMinutes: number, targetMinutes: number) {
 function tokenMatchesSite(token: any, siteId: string, brandIds: string[]) {
   if (!token?.subscription?.endpoint) return false;
   if (token.enabled === false || token.isActive === false) return false;
-  if (token.siteId) return token.siteId === siteId;
-  if (token.brandId) return brandIds.includes(String(token.brandId));
-  return false;
+  // Cocok jika siteId ATAU brandId sesuai — jangan berhenti di siteId saja
+  const matchesSite  = token.siteId  && token.siteId === siteId;
+  const matchesBrand = token.brandId && brandIds.includes(String(token.brandId));
+  return !!(matchesSite || matchesBrand);
 }
 
 async function disableInvalidToken(db: Firestore, tokenDoc: QueryDocumentSnapshot, message: string) {
@@ -319,9 +320,21 @@ async function runScheduler(req: NextRequest) {
           const logRef = db.collection('attendance_notification_logs').doc(logDocId);
           const logSnap = await logRef.get();
           if (logSnap.exists) {
-            results.skippedDuplicate += 1;
-            siteCounters.skippedDuplicate += 1;
-            continue;
+            const logData = logSnap.data() || {};
+            // Jika sudah terkirim atau diskip secara permanen, jangan kirim ulang
+            if (logData.status === 'sent' || logData.status === 'skipped') {
+              results.skippedDuplicate += 1;
+              siteCounters.skippedDuplicate += 1;
+              continue;
+            }
+            // Jika gagal (failed), retry selama masih dalam reminder window
+            // Batasi retry agar tidak loop tanpa batas
+            const retryCount = Number(logData.retryCount ?? 0);
+            if (logData.status === 'failed' && retryCount >= 3) {
+              results.skippedDuplicate += 1;
+              siteCounters.skippedDuplicate += 1;
+              continue;
+            }
           }
 
           const attendance = await getAttendanceState(db, uid, local.dateKey);
@@ -398,12 +411,14 @@ async function runScheduler(req: NextRequest) {
             if (err?.statusCode === 410 || err?.statusCode === 404) {
               await disableInvalidToken(db, tokenDoc, message);
             }
+            const prevRetry = logSnap.exists ? Number((logSnap.data() || {}).retryCount ?? 0) : 0;
             await logRef.set({
               ...logBase,
               status: 'failed',
               errorMessage: message,
               reason: 'push_error',
-              createdAt: FieldValue.serverTimestamp(),
+              retryCount: prevRetry + 1,
+              createdAt: logSnap.exists ? (logSnap.data()?.createdAt ?? FieldValue.serverTimestamp()) : FieldValue.serverTimestamp(),
             });
             results.failed += 1;
             results.errors.push(`${uid}: ${message}`);

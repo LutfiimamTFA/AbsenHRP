@@ -137,64 +137,66 @@ service cloud.firestore {
     // ── attendance_condition_reports ─────────────────────────────────────────
     match /attendance_condition_reports/{reportId} {
 
-      // Cek kepemilikan dari data dokumen (uid atau employeeUid)
+      // Kepemilikan — menerima uid, employeeUid, dan userId agar kompatibel dengan data lama
       function isConditionReportOwner(data) {
         return isSignedIn() && (
-          data.get('uid', '') == request.auth.uid ||
-          data.get('employeeUid', '') == request.auth.uid
-        );
-      }
-
-      // Cek kepemilikan dari data yang sedang di-create (request.resource)
-      function isConditionReportOwnerOnCreate(data) {
-        return isSignedIn() && (
-          data.get('uid', '') == request.auth.uid ||
-          data.get('employeeUid', '') == request.auth.uid
+          data.get('uid', '')         == request.auth.uid ||
+          data.get('employeeUid', '') == request.auth.uid ||
+          data.get('userId', '')      == request.auth.uid
         );
       }
 
       // Staff: create laporan milik sendiri
-      allow create: if isConditionReportOwnerOnCreate(request.resource.data);
+      allow create: if isSignedIn() && (
+        request.resource.data.get('uid', '')         == request.auth.uid ||
+        request.resource.data.get('employeeUid', '') == request.auth.uid ||
+        request.resource.data.get('userId', '')      == request.auth.uid
+      );
 
       // Staff/HRD: get dokumen tunggal
       allow get: if isSignedIn() && (
-        isSuperAdmin() ||
-        isHrd() ||
+        isPrivileged() ||
         isConditionReportOwner(resource.data)
       );
 
-      // Staff: list hanya dokumen milik sendiri
-      // Firestore memverifikasi per-dokumen bahwa uid/employeeUid == request.auth.uid
-      // Query karyawan WAJIB selalu mengandung where("uid","==",user.uid)
-      // atau where("employeeUid","==",user.uid) agar rule ini terpenuhi
+      // Staff: list/query hanya dokumen milik sendiri
+      // Query WAJIB mengandung where("uid","==",user.uid) atau where("employeeUid","==",user.uid)
+      // agar Firestore dapat memverifikasi rule ini per-dokumen tanpa composite index
       allow list: if isSignedIn() && (
-        isSuperAdmin() ||
-        isHrd() ||
+        isPrivileged() ||
         isConditionReportOwner(resource.data)
       );
 
-      // HRD: update bebas. Staff: hanya boleh update field non-review selama masih pending
+      // HRD: update bebas.
+      // Staff: boleh update field linking kapan saja (bukan bergantung reviewStatus).
+      // Staff: boleh update field konten hanya selama masih pending.
       allow update: if isSignedIn() && (
-        isSuperAdmin() ||
-        isHrd() ||
+        isPrivileged() ||
         (
-            isConditionReportOwner(resource.data)
-            && resource.data.get('reviewStatus', 'pending') == 'pending'
-            && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
-              'note', 'conditionNote',
-              'proofPhotoUrl', 'proofPhotoPath',
-              'conditionProofPhotoUrl', 'conditionProofFileId',
-              'proofPhotoFileId', 'driveFileId',
-              'driveViewUrl', 'driveDownloadUrl',
-              'attachmentUrls', 'attachments',
-              'reportLocationAddress', 'reportLocationLat',
-              'reportLocationLng', 'reportGpsAccuracy',
+          isConditionReportOwner(resource.data) && (
+            // Linking boleh kapan saja
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly([
               'linkedAttendanceId', 'linkedAt', 'updatedAt'
             ])
+            ||
+            // Konten hanya boleh diubah selama masih pending
+            (resource.data.get('reviewStatus', 'pending') == 'pending'
+             && request.resource.data.diff(resource.data).affectedKeys().hasOnly([
+               'note', 'conditionNote',
+               'proofPhotoUrl', 'proofPhotoPath',
+               'conditionProofPhotoUrl', 'conditionProofFileId',
+               'proofPhotoFileId', 'driveFileId',
+               'driveViewUrl', 'driveDownloadUrl',
+               'attachmentUrls', 'attachments',
+               'reportLocationAddress', 'reportLocationLat',
+               'reportLocationLng', 'reportGpsAccuracy',
+               'linkedAttendanceId', 'linkedAt', 'updatedAt'
+             ]))
+          )
         )
       );
 
-      allow delete: if isSuperAdmin();
+      allow delete: if isPrivileged();
     }
 
 

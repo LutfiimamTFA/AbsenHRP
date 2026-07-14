@@ -268,6 +268,9 @@ export default function AbsenPage() {
   // Live GPS watch
   const [liveLocation, setLiveLocation] = useState<LiveLocation | null>(null);
   const locationRef = useRef<LiveLocation | null>(null);
+  // Condition report IDs — set synchronously after addDoc so handleSubmit never races onSnapshot
+  const checkInReportIdRef  = useRef<string | null>(null);
+  const checkOutReportIdRef = useRef<string | null>(null);
   useEffect(() => {
     locationRef.current = liveLocation;
   }, [liveLocation]);
@@ -528,6 +531,8 @@ export default function AbsenPage() {
   }, [db, user, userLoading, isAttendanceAllowed, toast]);
 
   // ── Condition reports hari ini — realtime onSnapshot ──────────
+  // Query SATU FIELD saja (uid atau employeeUid) agar tidak butuh composite index.
+  // Filter tanggal dilakukan di client setelah data diterima.
   useEffect(() => {
     if (!user?.uid || !isAttendanceAllowed) {
       setTodayConditionReports([]);
@@ -536,91 +541,89 @@ export default function AbsenPage() {
     }
     const todayDateKey = format(new Date(), "yyyy-MM-dd");
     setLoadingConditionReports(true);
-
-    const querySpecs = [
-      { ownerField: "uid", dateField: "dateKey", queryMode: "owner_by_uid_and_dateKey" },
-      { ownerField: "employeeUid", dateField: "dateKey", queryMode: "owner_by_employeeUid_and_dateKey" },
-      { ownerField: "uid", dateField: "reportDate", queryMode: "owner_by_uid_and_reportDate" },
-      { ownerField: "employeeUid", dateField: "reportDate", queryMode: "owner_by_employeeUid_and_reportDate" },
-    ] as const;
-
-    const queryDocs = new Map<string, any[]>();
-    const initialized = new Set<string>();
-    let settledInitialQueries = 0;
-    let failedInitialQueries = 0;
     let active = true;
 
-    const flushMergedReports = () => {
+    // Merge dari dua query single-field: uid dan employeeUid
+    const byUid:         Map<string, any> = new Map();
+    const byEmployeeUid: Map<string, any> = new Map();
+    let uidSettled = false;
+    let empSettled = false;
+    let uidFailed  = false;
+    let empFailed  = false;
+
+    const flush = () => {
       if (!active) return;
       const merged = new Map<string, any>();
-      for (const docs of queryDocs.values()) {
-        for (const row of docs) {
-          merged.set(row.id, { ...(merged.get(row.id) || {}), ...row });
-        }
+      for (const row of [...byUid.values(), ...byEmployeeUid.values()]) {
+        merged.set(row.id, { ...(merged.get(row.id) || {}), ...row });
       }
-      setTodayConditionReports(Array.from(merged.values()));
-    };
-
-    const markInitialSettled = (key: string, failed = false) => {
-      if (initialized.has(key)) return;
-      initialized.add(key);
-      settledInitialQueries += 1;
-      if (failed) failedInitialQueries += 1;
-      if (settledInitialQueries === querySpecs.length) {
-        setLoadingConditionReports(false);
-        if (failedInitialQueries === querySpecs.length) {
-          console.warn("[attendance_condition_reports] owner-scoped queries unavailable; continuing with empty condition reports", {
-            uid: user.uid,
-            todayDateKey,
-            failedInitialQueries,
-            totalQueries: querySpecs.length,
-          });
-        }
-      }
-    };
-
-    const unsubscribers = querySpecs.map(({ ownerField, dateField, queryMode }) => {
-      const key = `${ownerField}:${dateField}`;
-      console.log("[WEB_ABSEN_CONDITION_REPORT_QUERY_DEBUG]", {
-        uid: user.uid,
-        todayDateKey,
-        queryMode,
-        fields: [ownerField, dateField],
+      // Filter client-side: hanya ambil laporan hari ini
+      const today = Array.from(merged.values()).filter(r => {
+        const dk = r.dateKey || r.reportDate || r.attendanceDate || null;
+        return dk === todayDateKey;
       });
+      setTodayConditionReports(today);
+    };
 
-      return onSnapshot(
-        query(
-          collection(db, "attendance_condition_reports"),
-          where(ownerField, "==", user.uid),
-          where(dateField, "==", todayDateKey),
-        ),
-        snap => {
-          queryDocs.set(key, snap.docs.map(d => ({ id: d.id, ...d.data() })));
-          flushMergedReports();
-          markInitialSettled(key);
-        },
-        err => {
-          queryDocs.set(key, []);
-          console.warn("[attendance_condition_reports] owner-scoped query unavailable:", {
-            uid: user.uid,
-            todayDateKey,
-            queryMode,
-            fields: [ownerField, dateField],
-            code: err?.code || null,
-            name: err?.name || null,
-            message: err?.message,
+    const checkSettled = () => {
+      if (uidSettled && empSettled) {
+        setLoadingConditionReports(false);
+        if (uidFailed && empFailed) {
+          console.error("[attendance_condition_reports] semua query gagal:", { uid: user.uid, todayDateKey });
+          toast({
+            variant: "destructive",
+            title: "Laporan kondisi gagal dimuat",
+            description: "Periksa koneksi internet dan coba refresh halaman.",
           });
-          flushMergedReports();
-          markInitialSettled(key, true);
-        },
-      );
+        }
+      }
+    };
+
+    console.log("[WEB_ABSEN_CONDITION_REPORT_QUERY_DEBUG]", {
+      uid: user.uid, todayDateKey, queryMode: "single_field_client_date_filter",
+      queries: ["uid == uid", "employeeUid == uid"],
     });
+
+    // Query 1: berdasarkan uid (single-field, tidak perlu composite index)
+    const unsubUid = onSnapshot(
+      query(collection(db, "attendance_condition_reports"), where("uid", "==", user.uid)),
+      snap => {
+        byUid.clear();
+        snap.docs.forEach(d => byUid.set(d.id, { id: d.id, ...d.data() }));
+        flush();
+        if (!uidSettled) { uidSettled = true; checkSettled(); }
+      },
+      err => {
+        byUid.clear();
+        console.error("[attendance_condition_reports] query uid gagal:", { code: err?.code, message: err?.message });
+        flush();
+        if (!uidSettled) { uidSettled = true; uidFailed = true; checkSettled(); }
+      },
+    );
+
+    // Query 2: berdasarkan employeeUid (untuk kompatibilitas data lama)
+    const unsubEmp = onSnapshot(
+      query(collection(db, "attendance_condition_reports"), where("employeeUid", "==", user.uid)),
+      snap => {
+        byEmployeeUid.clear();
+        snap.docs.forEach(d => byEmployeeUid.set(d.id, { id: d.id, ...d.data() }));
+        flush();
+        if (!empSettled) { empSettled = true; checkSettled(); }
+      },
+      err => {
+        byEmployeeUid.clear();
+        console.error("[attendance_condition_reports] query employeeUid gagal:", { code: err?.code, message: err?.message });
+        flush();
+        if (!empSettled) { empSettled = true; empFailed = true; checkSettled(); }
+      },
+    );
 
     return () => {
       active = false;
-      unsubscribers.forEach(unsub => unsub());
+      unsubUid();
+      unsubEmp();
     };
-  }, [db, user?.uid, isAttendanceAllowed]);
+  }, [db, user?.uid, isAttendanceAllowed, toast]);
 
   // ── Live GPS watch ─────────────────────────────────────────────
   useEffect(() => {
@@ -1172,6 +1175,14 @@ export default function AbsenPage() {
     setShowInstallGuide(true);
   }, [installStatus, toast]);
 
+  // Normalisasi tipe laporan kondisi — mendukung berbagai nama field
+  const normalizeReportType = (r: any): 'check_in' | 'check_out' | null => {
+    const t = r?.reportType || r?.conditionType || null;
+    if (t === 'check_in'  || t === 'IN')  return 'check_in';
+    if (t === 'check_out' || t === 'OUT') return 'check_out';
+    return null;
+  };
+
   // ── Push Notification: helpers ────────────────────────────────
   function urlBase64ToUint8Array(base64String: string): Uint8Array {
     const padding = '='.repeat((4 - (base64String.length % 4)) % 4);
@@ -1562,6 +1573,7 @@ export default function AbsenPage() {
       const report = cleanUndefined({
         uid: user.uid,
         employeeUid: user.uid,
+        userId: user.uid,
         employeeName: user.displayName || null,
         employeeId: user.employeeId || null,
         brandId: user.brandId || null,
@@ -1626,9 +1638,20 @@ export default function AbsenPage() {
         driveFileId: payload.driveFileId,
       });
 
-      // onSnapshot handles state update; we only need the doc ID for local optimistic update
       const docRef = await addDoc(collection(db, "attendance_condition_reports"), payload);
-      void docRef; // ID available if needed for linking
+      const newId = docRef.id;
+
+      // Simpan ID ke ref agar handleSubmit tidak bergantung pada onSnapshot (mencegah race condition)
+      if (conditionType === 'check_in') checkInReportIdRef.current  = newId;
+      else                              checkOutReportIdRef.current = newId;
+
+      // Optimistic upsert ke state — onSnapshot akan menyinkronkan ulang, tapi state sudah akurat sekarang
+      setTodayConditionReports(prev => {
+        const without = prev.filter(r => r.id !== newId && !(r.conditionType === conditionType && !r.id));
+        return [...without, { id: newId, ...report, createdAt: new Date().toISOString(), updatedAt: new Date().toISOString() }]
+          .sort((a, b) => (a.reportedAt ?? '').localeCompare(b.reportedAt ?? ''));
+      });
+
       cancelConditionReport();
       const attendanceTypeLabel = conditionType === 'check_in' ? 'masuk' : 'pulang';
       toast({ title: 'Laporan terkirim', description: `Kondisi ${attendanceTypeLabel} telah dilaporkan ke HRD untuk direview.` });
@@ -1829,21 +1852,47 @@ export default function AbsenPage() {
         brandId: user.brandId || null,
         dateKey: format(now, "yyyy-MM-dd"),
         // Condition report links
-        ...(tapType === 'IN' ? {
-          checkInConditionReportId: todayConditionReports.find(r => r.reportType === 'check_in')?.id || null,
-          specialCondition: todayConditionReports.find(r => r.reportType === 'check_in')?.specialCondition || null,
-          conditionNote: todayConditionReports.find(r => r.reportType === 'check_in')?.conditionNote || null,
-          conditionCategory: todayConditionReports.find(r => r.reportType === 'check_in')?.conditionCategory || null,
-          conditionReasonLabel: todayConditionReports.find(r => r.reportType === 'check_in')?.reasonLabel || null,
-        } : {
-          checkOutConditionReportId: todayConditionReports.find(r => r.reportType === 'check_out')?.id || null,
-          specialCondition: todayConditionReports.find(r => r.reportType === 'check_out')?.specialCondition || null,
-          conditionNote: todayConditionReports.find(r => r.reportType === 'check_out')?.conditionNote || null,
-          conditionCategory: todayConditionReports.find(r => r.reportType === 'check_out')?.conditionCategory || null,
-          conditionReasonLabel: todayConditionReports.find(r => r.reportType === 'check_out')?.reasonLabel || null,
-        }),
-        linkedConditionReportIds: todayConditionReports.map(r => r.id),
-        hasConditionReport: todayConditionReports.length > 0,
+        // Gunakan ref (sinkron, langsung dari addDoc) sebagai primary; state sebagai fallback
+        ...(() => {
+          const isIn = tapType === 'IN';
+          const typeKey = isIn ? 'check_in' : 'check_out';
+          // Ref paling andal — tidak bergantung onSnapshot
+          const refId = isIn ? checkInReportIdRef.current : checkOutReportIdRef.current;
+          // Fallback ke state: pilih laporan terbaru berdasarkan reportedAt
+          const stateReport = todayConditionReports
+            .filter(r => normalizeReportType(r) === typeKey)
+            .sort((a, b) => (b.reportedAt ?? '').localeCompare(a.reportedAt ?? ''))
+            [0] ?? null;
+          const reportId    = refId ?? stateReport?.id ?? null;
+          const reportData  = stateReport ?? null;
+          return isIn ? {
+            checkInConditionReportId: reportId,
+            specialCondition:    reportData?.specialCondition   ?? null,
+            conditionNote:       reportData?.conditionNote      ?? null,
+            conditionCategory:   reportData?.conditionCategory  ?? null,
+            conditionReasonLabel:reportData?.reasonLabel        ?? null,
+          } : {
+            checkOutConditionReportId: reportId,
+            specialCondition:    reportData?.specialCondition   ?? null,
+            conditionNote:       reportData?.conditionNote      ?? null,
+            conditionCategory:   reportData?.conditionCategory  ?? null,
+            conditionReasonLabel:reportData?.reasonLabel        ?? null,
+          };
+        })(),
+        // Hanya sertakan laporan yang sesuai tap type agar tidak mencampur masuk/pulang
+        linkedConditionReportIds: (() => {
+          const typeKey = tapType === 'IN' ? 'check_in' : 'check_out';
+          const refId   = tapType === 'IN' ? checkInReportIdRef.current : checkOutReportIdRef.current;
+          const stateIds = todayConditionReports
+            .filter(r => normalizeReportType(r) === typeKey)
+            .map(r => r.id);
+          return refId && !stateIds.includes(refId) ? [refId, ...stateIds] : stateIds;
+        })(),
+        hasConditionReport: (() => {
+          const typeKey = tapType === 'IN' ? 'check_in' : 'check_out';
+          const refId   = tapType === 'IN' ? checkInReportIdRef.current : checkOutReportIdRef.current;
+          return !!refId || todayConditionReports.some(r => normalizeReportType(r) === typeKey);
+        })(),
         // Fields sesuai spec untuk HRD review
         locationLat: gps?.lat ?? null,
         locationLng: gps?.lng ?? null,
@@ -1900,12 +1949,15 @@ export default function AbsenPage() {
       const batch = writeBatch(db);
       batch.set(eventRef, payload);
 
-      // Update linkedAttendanceId pada condition report yang terkait
-      const linkedReport = tapType === 'IN'
-        ? todayConditionReports.find(r => r.reportType === 'check_in')
-        : todayConditionReports.find(r => r.reportType === 'check_out');
-      if (linkedReport?.id) {
-        const reportRef = doc(db, "attendance_condition_reports", linkedReport.id);
+      // Update linkedAttendanceId — ref sinkron lebih andal daripada state (menghindari race condition)
+      const typeKey      = tapType === 'IN' ? 'check_in' : 'check_out';
+      const refReportId  = tapType === 'IN' ? checkInReportIdRef.current : checkOutReportIdRef.current;
+      const stateReport  = todayConditionReports
+        .filter(r => normalizeReportType(r) === typeKey)
+        .sort((a, b) => (b.reportedAt ?? '').localeCompare(a.reportedAt ?? ''))[0] ?? null;
+      const linkedReportId = refReportId ?? stateReport?.id ?? null;
+      if (linkedReportId) {
+        const reportRef = doc(db, "attendance_condition_reports", linkedReportId);
         batch.update(reportRef, {
           linkedAttendanceId: eventRef.id,
           linkedAt: serverTimestamp(),
@@ -2937,8 +2989,8 @@ export default function AbsenPage() {
 
             {/* ── Card: Kondisi Khusus Hari Ini ─────────────────── */}
             {isAttendanceAllowed && (() => {
-              const checkInReports = todayConditionReports.filter(r => r.reportType === 'check_in' || !r.reportType);
-              const checkOutReports = todayConditionReports.filter(r => r.reportType === 'check_out');
+              const checkInReports  = todayConditionReports.filter(r => normalizeReportType(r) === 'check_in');
+              const checkOutReports = todayConditionReports.filter(r => normalizeReportType(r) === 'check_out');
 
               // Compact chip — 1 baris, klik untuk buka detail modal
               const renderCompactChip = (r: any, label: string) => {
